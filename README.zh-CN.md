@@ -251,6 +251,12 @@ Hugging Face 上已有预转换的 **GLM-5.2 int4** 容器——请务必使用
 > [#8](https://github.com/JustVugg/colibri/issues/8)）：
 > `ls -l <model>/out-mtp-*`——正确的 int8 大小为 `3527131672 / 5366238584 / 1065950496`。
 
+> **中国大陆用户**：HF 直链通常不可达。FP8 源权重可走智谱官方 ModelScope 镜像
+> （`python3 download_fp8.py --source ms`，国内 CDN 通常 50-100+ MB/s）；所有
+> HuggingFace 路径可设 `HF_ENDPOINT=https://hf-mirror.com`（配合
+> `HF_HUB_DISABLE_XET=1`，实测 22-46 MB/s）。详见
+> [Quick Start 的中国大陆网络章节](docs/quickstart.md)。
+
 你也可以自行从 FP8 源转换——只需一条可断点续传的命令，且任何时候都不需要
 在磁盘上同时存放完整的 756 GB：
 

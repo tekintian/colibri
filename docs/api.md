@@ -47,6 +47,13 @@ than being silently ignored. Audio is accepted only by Inkling checkpoints with
 audio support. The default bind address is localhost; set `COLI_API_KEY` before
 exposing the server beyond the machine.
 
+When you do set a key, prefer the `COLI_API_KEY` environment variable (or a
+`.env` file next to `docker/docker-compose.yml`) over the `--api-key`
+command-line flag: the flag's value is visible in `ps` output and
+`/proc/<pid>/cmdline` to every local user, while an environment variable is
+readable only by your account (and root). The two are otherwise equivalent —
+`--api-key` simply defaults to `COLI_API_KEY`.
+
 ### Tool-calling support
 
 | Engine | OpenAI `tools` | Anthropic `tool_use` | Native format |

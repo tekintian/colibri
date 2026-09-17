@@ -139,7 +139,53 @@ skip this step.)
 
 ## 3. Get the model
 
-You have two paths.
+You have two paths. (Both assume the Hugging Face and GitHub endpoints are
+reachable — if you are on the mainland, read
+[Downloading from Mainland China](#downloading-from-mainland-china中国大陆网络环境)
+first.)
+
+### Downloading from Mainland China（中国大陆网络环境）
+
+Direct access to Hugging Face and GitHub is often unavailable or throttled on
+the mainland. Three working paths, in order of preference:
+
+**1. ModelScope (魔搭) — fastest, no proxy needed.** The GLM-5.2-FP8 source
+weights are mirrored by ZhipuAI's official repo, and the FP8 downloader is
+ModelScope-first already (run from the repo's `c/` directory, where the
+script lives):
+
+```bash
+python3 download_fp8.py --source ms --dest /nvme/glm52_fp8     # MS CDN, usually 50-100+ MB/s
+```
+
+Converting from FP8 yourself can route through ModelScope as well:
+
+```bash
+COLI_DL_SOURCE=ms python3 tools/convert_fp8_to_int4.py --repo zai-org/GLM-5.2-FP8 --outdir /nvme/glm52_i4
+```
+
+**2. hf-mirror.com — for anything HuggingFace-based.** Every path that uses
+`huggingface_hub` / `hf download` (all model docs below) honors the endpoint
+override:
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HUB_DISABLE_XET=1      # Xet/CAS stalls through the mirror; plain HTTP does not
+```
+
+Measured throughput through the mirror: 22-46 MB/s sustained on a residential
+line (the 6×5090 experiment log), i.e. the 372 GB container lands in ~2.5-5 h.
+
+**3. GitHub (code & releases).** `git clone` and the release archives are on
+github.com; if that is unreachable, mirror/accelerator prefixes (e.g.
+ghproxy-style `https://mirror.ghproxy.com/https://github.com/...`) work for
+release tarballs — afterwards verify them against the official Release page's
+SHA256SUMS, never against the mirror's（验证任何第三方镜像提供的产物时，务必比对官方 Release 页的 SHA256SUMS）.
+
+**Bandwidth planning.** A single HF stream is paced at ~2 MB/s (≈52 h for
+372 GB). Raise concurrency with `COLI_DL_STREAMS=8` (multi-stream, resumable)
+where the source allows it. Disk note: keep the model on a fast local NVMe —
+expert streaming is read-latency-bound.
 
 ### Easiest — download a ready-made int4 container
 
@@ -214,6 +260,19 @@ If something doesn't work, run `./coli doctor` — it reports exactly what's
 missing (compiler, model files, permissions) and how to fix it.
 
 ---
+
+## Local state files & privacy
+
+Colibri writes two state files next to the model directory:
+
+- `.coli_usage` — routing counters (`layer expert count`) only. No conversation
+  content. Delete it any time; it rebuilds from zero.
+- `.coli_kv` — the compressed KV state of your last conversation, so a new
+  session reopens warm with no re-prefill. **It is derived from your prompts**
+  (a compressed representation, not plaintext, but not encrypted either) and
+  it is readable by anyone who can read that directory. Delete it (or use
+  `:reset` in `coli chat`) before moving/sharing a model directory, and be
+  aware backups pick it up too.
 
 ## Where to go next
 

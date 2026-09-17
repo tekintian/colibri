@@ -4,6 +4,11 @@ Reference for the environment variables read by the colibrì engine.
 
 **Generated from `dev @ def8419`** by scanning every `getenv()` / `getenv_utf8()` site in `c/*.c`, `c/*.h`, `c/*.cu` and `c/*.mm`. Defaults and behavior are taken from the source; see [MAINTAINING-DOCS.md](MAINTAINING-DOCS.md) to regenerate this after the code changes.
 
+<!-- Hand-added entries below; regenerate will need re-adding. The rows in the
+     "Server / CLI" table for COLI_CLUSTER_TOKEN, COLI_CLUSTER_IO_TIMEOUT,
+     COLI_AUDIT_LOG and COLI_DL_SOURCE document Python-side/cluster knobs the
+     C-source scan cannot see. -->
+
 ## Which program reads these?
 
 **There are seven engine binaries, and they do not share a knob set.** The main
@@ -468,6 +473,10 @@ These are read by the Python programs (not the `glm` engine), so they don't appe
 | `COLI_POLICY` | `quality` | Resource policy (shared with the engine): `quality` \| `balanced` \| `experimental-fast`. |
 | `COLI_COLOR` | auto (TTY) | `COLI_COLOR=1` forces colored `coli` output when not a TTY. |
 | `COLI_RAW` | `0` | `coli` raw output mode. |
+| `COLI_CLUSTER_TOKEN` | unset (off) | Shared secret for the cluster expert transport — read by the `colibri` engine **and** `cluster.py` (worker, coordinator and registry all compare it right after the magic+version header). Unset or empty = the plain unauthenticated v1 protocol, with a warning; that is fine on a trusted LAN and unsafe on one you share. |
+| `COLI_CLUSTER_IO_TIMEOUT` | `60` | Seconds a cluster socket read/write may block before the peer is considered dead (engine `cluster_io` and `cluster.py`). Values below 1 are clamped to 1. Raise it on high-latency links between workers and the coordinator. |
+| `COLI_AUDIT_LOG` | unset (off) | Path of an opt-in JSONL audit trail written by `openai_server.py`: one line per completed request — timestamp, peer IP, method, path, status, duration, model. Deliberately nothing else: no request body, no prompt or completion text, no API key. |
+| `COLI_DL_SOURCE` | `auto` | Download source for the converters (`download_fp8.py`, `tools/convert_fp8_to_int4.py`): `auto` tries ModelScope first with Hugging Face fallback, `ms` is ModelScope only, `hf` is Hugging Face only. |
 
 > **Debugging an OpenCode session:** `COLI_DEBUG=1` watches the model's output stream; `COLI_DEBUG=2` shows both sides (prompt + output) as a transcript. Add `COLI_TOOL_SALVAGE=1` on int4 to catch mangled tool calls.
 
