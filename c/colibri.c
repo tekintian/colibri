@@ -3679,8 +3679,8 @@ static int uring_wait_all(UringBatch *b){
  * condvar exist ONLY to park/wake idle workers, never for correctness. Gated
  * behind PIPE=1; OFF => the original blocking-load + serial-matmul path runs
  * byte-identically. */
-static int g_pipe=0;      /* PIPE=1: async expert-load pipeline. Default ON for Windows
-                           * (parsed in main: getenv("PIPE")?:1 on _WIN32, :0 elsewhere).
+static int g_pipe=0;      /* PIPE=1: async expert-load pipeline. Default ON everywhere
+                           * (parsed in main: getenv("PIPE")?:1 on every platform — P-1).
                            * Keeps expert pread off the forward-pass thread so loads overlap
                            * the matmul. PIPE=0 opts back into the blocking serial path. */
 static int g_pipe_nw=8;   /* PIPE_WORKERS=n: I/O worker threads (disk-parallel reads) */
@@ -11008,13 +11008,13 @@ int main(int argc, char **argv){
     if(g_pilot_nw<1) g_pilot_nw=1; if(g_pilot_nw>16) g_pilot_nw=16;
     g_pilot_evict_guard = getenv("PILOT_EVICT_GUARD")?atoi(getenv("PILOT_EVICT_GUARD")):1; /* 0 = old LRU eviction (A/B) */
     g_disk_split = getenv("DISK_SPLIT")?atoi(getenv("DISK_SPLIT")):0; /* 1 = split dei disk load nelle stats */
-    g_pipe = getenv("PIPE")?atoi(getenv("PIPE")):
-#ifdef _WIN32
-        1                        /* default ON: overlap expert load ‖ matmul (byte-identical; reorders I/O). PIPE=0 opts out */
-#else
-        0
-#endif
-        ;
+    /* P-1: default ON everywhere since the hardening pass (was Windows-only):
+     * overlapping expert loads with the matmul is byte-identical, it only
+     * reorders I/O. PIPE=0 still opts out of the async pipe.
+     * COLI_PIPE_BLOCK=1 swaps pipe_wait's sched_yield spin for a condvar block
+     * (kept default 0 — upstream #159's tradeoff, pending a hardware A/B
+     * before flipping that default too). */
+    g_pipe = getenv("PIPE")?atoi(getenv("PIPE")):1;
     if(pipe_workers_imply_pipe(getenv("PIPE"),getenv("PIPE_WORKERS"),g_pipe)){
         g_pipe=1;
         fprintf(stderr,"[PIPE] PIPE_WORKERS is set — enabling the async pipe (PIPE=1 implied; set PIPE=0 to override)\n");
