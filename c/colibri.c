@@ -3160,6 +3160,21 @@ static int expert_load(Model *m, int layer, int eid, ESlot *s, int fatal, int de
  * request contains the routed batch-union for a layer. */
 #define COLI_CLUSTER_MAGIC "COLIEX01"
 #define COLI_CLUSTER_VERSION 1u
+/* H-1: optional shared-secret handshake for the expert transport. Both sides
+ * treat an unset/empty COLI_CLUSTER_TOKEN as "off", so with no token configured
+ * the wire stays byte-identical to the plain v1 protocol (version stays 1).
+ * Token opzionale: assente/vuoto = nessun campo extra sul filo. */
+static const char *cluster_token(void){ return getenv("COLI_CLUSTER_TOKEN"); }
+/* H-1: bounded socket I/O — a dead peer (worker or coordinator) makes the
+ * blocking send/recv loop fail instead of hanging the engine forever.
+ * COLI_CLUSTER_IO_TIMEOUT seconds, default 60, minimum 1. */
+static void cluster_set_io_timeout(int fd){
+    int secs = getenv("COLI_CLUSTER_IO_TIMEOUT") ? atoi(getenv("COLI_CLUSTER_IO_TIMEOUT")) : 60;
+    if(secs < 1) secs = 1;
+    struct timeval tv; tv.tv_sec = secs; tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
 static int cluster_io(int fd, void *buf, size_t n, int write_mode){
     char *p=(char*)buf;
     while(n){
@@ -3190,6 +3205,7 @@ static int cluster_connect_one(const char *spec, ClusterWorker *out){
         close(fd); fd=-1;
     }
     freeaddrinfo(ai); if(fd<0) return -1;
+    cluster_set_io_timeout(fd);              /* H-1: a dead worker fails fast, never hangs the coordinator */
     out->fd=fd;
     size_t hostlen=strlen(copy); if(hostlen>=sizeof(out->host)) hostlen=sizeof(out->host)-1;
     memcpy(out->host,copy,hostlen); out->host[hostlen]=0;
@@ -3243,6 +3259,9 @@ static void cluster_moe_batch(Model *m,int layer,float *x,int S,float *out,
         ClusterWorker *w=&g_cluster_workers[wi]; char magic[8]; uint32_t v;
         if(cluster_io(w->fd,(void*)COLI_CLUSTER_MAGIC,8,1)) goto fail;
         v=COLI_CLUSTER_VERSION; if(cluster_u32(w->fd,&v,1)) goto fail;
+        { const char *ct=cluster_token();     /* H-1: token field right after version, before layer */
+          if(ct&&*ct){ uint32_t ctlen=(uint32_t)strlen(ct);
+              if(cluster_u32(w->fd,&ctlen,1)||cluster_io(w->fd,(void*)ct,ctlen,1)) goto fail; } }
         v=(uint32_t)layer; if(cluster_u32(w->fd,&v,1)) goto fail;
         v=(uint32_t)D; if(cluster_u32(w->fd,&v,1)) goto fail;
         v=(uint32_t)m->c.moe_inter; if(cluster_u32(w->fd,&v,1)) goto fail;
@@ -3309,13 +3328,42 @@ static int cluster_worker_run(const char *snap,int port,int ebits,int dbits){
     struct sockaddr_in addr={0}; addr.sin_family=AF_INET; addr.sin_addr.s_addr=htonl(INADDR_ANY); addr.sin_port=htons((uint16_t)port);
     if(bind(fd,(struct sockaddr*)&addr,sizeof(addr))||listen(fd,4)){perror("cluster worker bind/listen");return 1;}
     fprintf(stderr,"[CLUSTER] expert worker listening on 0.0.0.0:%d (disk-backed, cache=%d/layer)\n",port,nr_layers);
+    const char *tok=cluster_token();
+    if(!tok||!*tok)
+        fprintf(stderr,"[CLUSTER] WARNING: COLI_CLUSTER_TOKEN not set - accepting unauthenticated connections (trusted networks only)\n");
     for(;;){
         int cfd=accept(fd,NULL,NULL); if(cfd<0){if(errno==EINTR)continue;break;}
+        cluster_set_io_timeout(cfd);          /* H-1: every request is bounded, not just the first */
         for(;;){
             char magic[8]; uint32_t v,layer,D,I,n;
             if(cluster_io(cfd,magic,8,0)) break;
-            if(memcmp(magic,COLI_CLUSTER_MAGIC,8)||cluster_u32(cfd,&v,0)||v!=COLI_CLUSTER_VERSION||
-               cluster_u32(cfd,&layer,0)||cluster_u32(cfd,&D,0)||cluster_u32(cfd,&I,0)||cluster_u32(cfd,&n,0)||
+            if(memcmp(magic,COLI_CLUSTER_MAGIC,8)||cluster_u32(cfd,&v,0)||v!=COLI_CLUSTER_VERSION){
+                close(cfd); cfd=-1; break;
+            }
+            /* H-1: shared-token handshake — optional field right after the version,
+             * exactly where the client writes it (before layer/D/I/n): u32 length,
+             * then the bytes. A bad length or a non-matching token voids the
+             * connection; the compare itself is constant-time (volatile xor). */
+            if(tok&&*tok){
+                uint32_t tlen;
+                if(cluster_u32(cfd,&tlen,0)||tlen<1||tlen>256||tlen!=(uint32_t)strlen(tok)){
+                    fprintf(stderr,"[CLUSTER] rejected connection: bad cluster token length\n");
+                    close(cfd); cfd=-1; break;
+                }
+                char given[256];
+                if(cluster_io(cfd,given,tlen,0)){
+                    fprintf(stderr,"[CLUSTER] rejected connection: incomplete cluster token\n");
+                    close(cfd); cfd=-1; break;
+                }
+                volatile unsigned char diff=0;   /* constant-time: no early exit on the first wrong byte */
+                for(uint32_t k=0;k<tlen;k++) diff|=(unsigned char)(given[k]^tok[k]);
+                if(diff){
+                    fprintf(stderr,"[CLUSTER] rejected connection: cluster token mismatch\n");
+                    close(cfd); cfd=-1; break;
+                }
+                fprintf(stderr,"[CLUSTER] authenticated expert coordinator\n");
+            }
+            if(cluster_u32(cfd,&layer,0)||cluster_u32(cfd,&D,0)||cluster_u32(cfd,&I,0)||cluster_u32(cfd,&n,0)||
                D!=(uint32_t)m.c.hidden||I!=(uint32_t)m.c.moe_inter||layer>=(uint32_t)nr_layers||n<1||n>64){
                 close(cfd); cfd=-1; break;
             }
