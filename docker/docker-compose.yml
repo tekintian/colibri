@@ -7,6 +7,12 @@
 #
 # The model is bind-mounted read-only from MODEL_DIR on the host — keep it on
 # NVMe/ext4, never a network mount (expert streaming is latency-bound).
+#
+# COLI_API_KEY is required: the gateway below binds 0.0.0.0 (that is the point
+# of a container), and openai_server refuses a non-loopback bind without a key.
+# Put it in a .env file next to this compose file (docker/.env) —
+#   COLI_API_KEY=change-me
+# — or export it in the environment you run `docker compose` from.
 services:
   colibri:
     build:
@@ -20,6 +26,9 @@ services:
     environment:
       # RAM budget in GB: more cached experts = faster. Size to the host.
       COLI_RAM: "${COLI_RAM:-24}"
+      # SEC-6: the gateway refuses a non-loopback bind without a key; pass one
+      # in explicitly (put it in a .env file next to this compose file).
+      COLI_API_KEY: "${COLI_API_KEY:?set COLI_API_KEY (e.g. in docker/.env)}"
     command:
       - serve
       - --host
