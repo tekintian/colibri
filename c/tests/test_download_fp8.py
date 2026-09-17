@@ -18,7 +18,7 @@ class DownloadExitStatusTests(unittest.TestCase):
 
     def test_failed_shard_returns_nonzero(self):
         manifest = (["model-00001.safetensors"],
-                    {"model-00001.safetensors": 4})
+                    {"model-00001.safetensors": 4}, {})
         with tempfile.TemporaryDirectory() as dest, \
              mock.patch.object(download_fp8, "get_shard_list_hf",
                                return_value=manifest), \
@@ -36,17 +36,17 @@ class DownloadExitStatusTests(unittest.TestCase):
     def test_explicit_modelscope_empty_manifest_does_not_fall_back(self):
         with tempfile.TemporaryDirectory() as dest, \
              mock.patch.object(download_fp8, "get_shard_list_ms",
-                               return_value=([], {})), \
+                               return_value=([], {}, {})), \
              mock.patch.object(download_fp8, "get_shard_list_hf") as hf:
             self.assertEqual(self.run_main(dest, "--source", "ms"), 1)
             hf.assert_not_called()
 
     def test_auto_empty_modelscope_manifest_uses_huggingface(self):
         name = "model-00001.safetensors"
-        manifest = ([name], {name: 4})
+        manifest = ([name], {name: 4}, {})
         with tempfile.TemporaryDirectory() as dest, \
              mock.patch.object(download_fp8, "get_shard_list_ms",
-                               return_value=([], {})), \
+                               return_value=([], {}, {})), \
              mock.patch.object(download_fp8, "get_shard_list_hf",
                                return_value=manifest), \
              mock.patch.object(download_fp8, "download_file_ms") as ms:
@@ -60,7 +60,9 @@ class DownloadExitStatusTests(unittest.TestCase):
 
     def test_complete_manifest_returns_zero(self):
         name = "model-00001.safetensors"
-        manifest = ([name], {name: 4})
+        # sha256(b"data") — exercises the post-download verification path
+        manifest = ([name], {name: 4},
+                    {name: "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"})
         with tempfile.TemporaryDirectory() as dest, \
              open(os.path.join(dest, name), "wb") as shard:
             shard.write(b"data")
@@ -77,7 +79,7 @@ class DownloadExitStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as dest:
             with open(os.path.join(dest, name), "wb") as shard:
                 shard.write(b"data")
-            manifest = ([name], {name: 4})
+            manifest = ([name], {name: 4}, {})
             with mock.patch.object(download_fp8, "get_shard_list_hf",
                                    return_value=manifest), \
                  mock.patch.object(download_fp8, "download_file_hf"):
@@ -86,7 +88,7 @@ class DownloadExitStatusTests(unittest.TestCase):
     def test_empty_manifest_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as dest, \
              mock.patch.object(download_fp8, "get_shard_list_hf",
-                               return_value=([], {})):
+                               return_value=([], {}, {})):
             self.assertEqual(self.run_main(dest, "--source", "hf"), 1)
 
 

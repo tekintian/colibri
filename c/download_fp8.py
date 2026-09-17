@@ -4,6 +4,8 @@ Usage: python download_fp8.py
        python download_fp8.py --parallel 4
        python download_fp8.py --source hf  (force HuggingFace)
        python download_fp8.py --dest /data/glm52_fp8  (or set $GLM_DEST)
+       python download_fp8.py --verify-only  (sha256-check existing shards, no download)
+       python download_fp8.py --no-verify  (skip the sha256 check)
 """
 import os, time, threading, argparse, subprocess
 
@@ -39,7 +41,11 @@ def get_shard_list_hf():
     info=HfApi().repo_info(REPO_HF, files_metadata=True)
     shards=sorted(s.rfilename for s in info.siblings if s.rfilename.endswith(".safetensors"))
     sizes={s.rfilename:s.size for s in info.siblings if s.rfilename.endswith(".safetensors")}
-    return shards, sizes
+    # LFS blobs carry a published sha256; plain-git files and some mirror HfApi
+    # compat layers return lfs=None -> those shards fall back to size-only checks.
+    shas={s.rfilename:s.lfs.sha256 for s in info.siblings
+          if s.rfilename.endswith(".safetensors") and s.lfs and s.lfs.sha256}
+    return shards, sizes, shas
 
 def get_shard_list_ms():
     """Get shard list from ModelScope API."""
@@ -49,7 +55,36 @@ def get_shard_list_ms():
     data = r.json()["Data"]["Files"]
     shards = sorted(f["Path"] for f in data if f["Path"].endswith(".safetensors"))
     sizes = {f["Path"]: f.get("Size", 0) for f in data if f["Path"].endswith(".safetensors")}
-    return shards, sizes
+    shas = {f["Path"]: f["Sha256"] for f in data if f["Path"].endswith(".safetensors") and f.get("Sha256")}
+    return shards, sizes, shas
+
+def sha256_of(path, chunk=1 << 23):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b: break
+            h.update(b)
+    return h.hexdigest()
+
+def verify_shards(shards, shas):
+    ok = bad = skipped = 0
+    for fn in shards:
+        expected = shas.get(fn)
+        p = os.path.join(DEST, fn)
+        if not expected:
+            skipped += 1; continue
+        if not os.path.exists(p):
+            bad += 1; print(f"  {C.yel}✗ missing {fn}{C.r}"); continue
+        actual = sha256_of(p)
+        if actual.lower() == str(expected).lower():
+            ok += 1
+        else:
+            bad += 1
+            print(f"  {C.yel}✗ SHA256 MISMATCH {fn}: expected {expected}, got {actual}{C.r}")
+    print(f"  sha256: {ok} verified, {bad} failed, {skipped} without published hash")
+    return bad == 0
 
 def download_file_ms(fn):
     """Download a single file from ModelScope using their CDN."""
@@ -95,6 +130,10 @@ def main():
                     help="download target directory (default: $GLM_DEST or ./glm52_fp8)")
     ap.add_argument("--source", choices=["auto", "ms", "hf"], default="auto",
                     help="auto (try ModelScope first), ms (ModelScope only), hf (HuggingFace only)")
+    ap.add_argument("--verify-only", action="store_true",
+                    help="verify sha256 of the already-downloaded shards and exit (no download)")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip the sha256 verification of the downloaded shards")
     args = ap.parse_args()
 
     if args.dest:
@@ -103,12 +142,12 @@ def main():
 
     # Determine source and get shard list
     use_ms = False
-    shards, sizes = [], {}
+    shards, sizes, shas = [], {}, {}
 
     if args.source in ("auto", "ms"):
         try:
             print(f"{C.dim}Trying ModelScope...{C.r}", end=" ", flush=True)
-            shards, sizes = get_shard_list_ms()
+            shards, sizes, shas = get_shard_list_ms()
             use_ms = True
             print(f"{C.grn}✓{C.r} {len(shards)} shards found")
         except Exception as e:
@@ -123,7 +162,7 @@ def main():
     if not shards:
         use_ms = False
         print(f"{C.dim}Using HuggingFace...{C.r}", end=" ", flush=True)
-        shards, sizes = get_shard_list_hf()
+        shards, sizes, shas = get_shard_list_hf()
         print(f"{C.grn}✓{C.r} {len(shards)} shards found")
     if not shards:
         print(f"{C.yel}No checkpoint shards found. Exiting.{C.r}")
@@ -132,6 +171,19 @@ def main():
     total = len(shards)
     total_bytes = sum(sizes.values())
     source_name = "ModelScope" if use_ms else "HuggingFace"
+
+    def verify_if_possible():
+        """Integrity gate (M-2): compare every shard against its published hash."""
+        if args.no_verify:
+            return True
+        if not shas:
+            print(f"  {C.dim}no published hashes available; skipped{C.r}")
+            return True
+        return verify_shards(shards, shas)
+
+    if args.verify_only:
+        print(f"\n{C.b}GLM-5.2-FP8 verify-only ({source_name}) · {total} shards{C.r}")
+        return 0 if verify_if_possible() else 1
 
     # Download metadata files
     meta_files = ["config.json", "tokenizer.json", "tokenizer_config.json",
@@ -168,6 +220,8 @@ def main():
     if not todo:
         if missing_meta:
             print(f"{C.yel}Missing metadata: {', '.join(missing_meta)}{C.r}")
+            return 1
+        if not verify_if_possible():
             return 1
         print(f"{C.grn}✓ All shards already downloaded!{C.r}\n"); return 0
 
@@ -214,7 +268,7 @@ def main():
                     if use_ms:
                         base = f"https://modelscope.cn/api/v1/models/{REPO_MS}/repo?Revision=master&FilePath="
                     else:
-                        base = f"https://huggingface.co/{REPO_HF}/resolve/main"
+                        base = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/") + f"/{REPO_HF}/resolve/main"
                     if download_file_curl(fn, base, expected):
                         success = True; break
                 except Exception as e:
@@ -245,6 +299,8 @@ def main():
     final = sum(1 for fn in shards if shard_complete(
         os.path.join(DEST, fn), sizes.get(fn, 0)))
     if final == total and not missing_meta:
+        if not verify_if_possible():
+            return 1
         print(f"{C.grn}{'='*50}")
         print(f"  ✓ All {total} shards downloaded!{C.r}\n")
         return 0
