@@ -16,7 +16,7 @@ jobs:
     name: Engine (Linux, CPU)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build colibri + inkling
         run: cd c && make colibri inkling
       - name: C test suite
@@ -40,7 +40,7 @@ jobs:
     name: Container image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build the slim image
         run: docker build -t colibri:ci -f docker/Dockerfile.slim .
       - name: The image actually runs
@@ -81,7 +81,7 @@ jobs:
     name: Sanitizers (ASan + UBSan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: C suite under ASan + UBSan
         run: make -C c test-asan
       - name: rANS fuzz round-trip (ASan + UBSan)
@@ -105,7 +105,7 @@ jobs:
     name: Vulkan (Lavapipe, software)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the Vulkan toolchain and a software driver
         run: |
           sudo apt-get update
@@ -155,7 +155,7 @@ jobs:
       # to be the user. One build leg closes that whole class.
       - name: Toolchain
         run: apk add --no-cache build-base linux-headers python3 git bash
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build the engines musl can build
         run: |
           cd c
@@ -203,7 +203,7 @@ jobs:
       run:
         shell: ${{ matrix.shell }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - if: matrix.os == 'windows-latest'
         id: msys2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
@@ -302,7 +302,7 @@ jobs:
       # so it needs the same pinned torch/transformers the Linux v4-tiny job
       # installs -- without them the step dies in generation, not in the
       # oracle (round 2 of this PR measured exactly that).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         if: matrix.os == 'macos-latest'
         with:
           python-version: '3.13'
@@ -366,7 +366,7 @@ jobs:
     name: CUDA syntax check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install CUDA toolkit (compiler only)
         uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d # v0.2.19
         with:
@@ -398,8 +398,8 @@ jobs:
     name: Qwen3.6 tiny oracle (token-exact + ASan/UBSan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -525,8 +525,8 @@ jobs:
     name: OLMoE tiny oracle (token-exact + dashboard HITS)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -566,8 +566,8 @@ jobs:
     name: DeepSeek V4.1 tiny oracle (engram + DSA + fp4 experts + vision)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -663,8 +663,8 @@ jobs:
     name: Qwen3.8 tiny oracle (GDN + QSA + PLE + MoE)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -714,8 +714,8 @@ jobs:
     name: Inkling oracle (token-exact vs transformers)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -768,8 +768,8 @@ jobs:
     name: Efficiency suite (tiny oracle)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -848,8 +848,8 @@ jobs:
     name: Cluster parity gate (fmt6/fmt4, token-exact)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -867,7 +867,7 @@ jobs:
     name: HIP syntax check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Free runner disk
         # rocm/dev images are large; hosted runners need the headroom freed
         # BEFORE the pull (which is why this is not a container: job).
@@ -925,7 +925,7 @@ jobs:
     # a CUDA release accepts VS 18; -allow-unsupported-compiler would only mask it.
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: MSVC environment (puts cl.exe on PATH for nvcc -ccbin)
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
       - name: Install CUDA toolkit (compiler only)
@@ -966,7 +966,7 @@ jobs:
         shell: bash
         run: echo "pin=$(sed -n 's/^DEEPGEMM_PIN ?= //p' c/Makefile | head -1)" >> "$GITHUB_OUTPUT"
       - name: Cache the pinned DeepGEMM checkout
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: c/third_party/deepgemm
           key: deepgemm-${{ steps.deepgemm-pin.outputs.pin }}-${{ hashFiles('c/patches-deepgemm-sm120-msvc.patch') }}
@@ -1019,7 +1019,7 @@ jobs:
           ls "$CUDA_PATH/bin"/cudart64_*.dll
           cp "$CUDA_PATH/bin"/cudart64_*.dll c/
       - name: Publish the portable DLL for people with a card (#1405)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coli_cuda-windows-portable
           if-no-files-found: error
@@ -1038,8 +1038,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -1054,8 +1054,8 @@ jobs:
     name: Python tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       # Sette test in tests/test_kimi_usage_cli.py e tests/test_inkling_prefix_serve.py
@@ -1073,8 +1073,8 @@ jobs:
     name: Python tests (Windows focused)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Converter and launcher tests
@@ -1100,8 +1100,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
