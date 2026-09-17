@@ -45,6 +45,14 @@ X86_64  := $(filter x86_64 amd64,$(TARGET_CPU))
 AARCH64 := $(filter aarch64 arm64,$(TARGET_CPU))
 PPC64   := $(filter powerpc64% ppc64%,$(TARGET_CPU))
 
+# --- Binary hardening (M-4) ---
+# Stack canaries on every platform, plus _FORTIFY_SOURCE and full RELRO where
+# the platform linker supports them (Linux/*BSD). Revert to the pre-hardening
+# plain build with HARDEN=0. -fPIE is deliberately NOT added: macOS links PIE
+# by default, the Windows build is -static (PIE conflicts with it), and the
+# mainstream distro GCCs already compile PIE by default.
+HARDEN ?= 1
+
 ifneq (,$(DARWIN))
 # --- macOS / Apple Silicon ---
 # Apple clang non include il runtime OpenMP: se c'e' libomp di Homebrew lo usa
@@ -82,6 +90,11 @@ CFLAGS += -mcpu=$(ARCH)
 endif
 endif
 LDFLAGS = -lm $(OMPL) $(EXTRA_LDFLAGS)
+# M-4 hardening: canaries only — Apple's ld64 has no -z relro/-z now, and the
+# toolchain already links PIE by default.
+ifeq ($(HARDEN),1)
+CFLAGS += -fstack-protector-strong
+endif
 # LTO is opt-in (LTO=1), not default: cross-TU inlining can change
 # floating-point contraction (FMA formation), and colibri's token-exactness
 # oracles are validated against the default build's optimization regime
@@ -109,6 +122,11 @@ CFLAGS  = -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) -fopenmp -Wall -Wextra -Wno-
 # (warns), so link psapi explicitly or the build fails undefined-reference on
 # modern GCC (e.g. 16.x under UCRT). Harmless where the pragma also resolves it.
 LDFLAGS = -lm -fopenmp -static -lpsapi $(EXTRA_LDFLAGS)
+# M-4 hardening: canaries only — the static link has no lazy binding to bind
+# (nothing for -z now to resolve at startup).
+ifeq ($(HARDEN),1)
+CFLAGS += -fstack-protector-strong
+endif
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto
@@ -124,6 +142,11 @@ CC      = gcc
 ARCH   ?= native
 CFLAGS  = -O3 -mcpu=$(ARCH) -fopenmp -pthread -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function $(EXTRA_CFLAGS)
 LDFLAGS = -lm -fopenmp -pthread $(EXTRA_LDFLAGS)
+# M-4 hardening: canaries + FORTIFY + full RELRO (GNU ld on Linux).
+ifeq ($(HARDEN),1)
+CFLAGS  += -fstack-protector-strong -D_FORTIFY_SOURCE=2
+LDFLAGS += -Wl,-z,relro -Wl,-z,now
+endif
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto
@@ -177,6 +200,11 @@ ARCHFLAG := -mcpu=$(ARCH)
 endif
 CFLAGS  = -O3 $(ARCHFLAG) -fopenmp -pthread -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function $(EXTRA_CFLAGS)
 LDFLAGS = -lm -fopenmp -pthread $(EXTRA_LDFLAGS)
+# M-4 hardening: canaries + FORTIFY + full RELRO.
+ifeq ($(HARDEN),1)
+CFLAGS  += -fstack-protector-strong -D_FORTIFY_SOURCE=2
+LDFLAGS += -Wl,-z,relro -Wl,-z,now
+endif
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto
@@ -192,6 +220,11 @@ CC      = gcc
 ARCH   ?= native
 CFLAGS  = -O3 -march=$(ARCH) -fopenmp -pthread -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function $(EXTRA_CFLAGS)
 LDFLAGS = -lm -fopenmp -pthread $(EXTRA_LDFLAGS)
+# M-4 hardening: canaries + FORTIFY + full RELRO.
+ifeq ($(HARDEN),1)
+CFLAGS  += -fstack-protector-strong -D_FORTIFY_SOURCE=2
+LDFLAGS += -Wl,-z,relro -Wl,-z,now
+endif
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto
