@@ -43,9 +43,11 @@ CPU-only by default.
 > (`ARCH=native` unlocks the vector instructions your chip actually has), or if
 > you plan to hack on the engine.
 >
-> **On ARM64 Linux (AWS Graviton, Ampere, Raspberry Pi, aarch64 VMs) there is no
-> shortcut**: the published Linux archive is x86_64 only. Build from source —
-> sections 1 and 2 work unchanged, and the engine needs no ARM-specific flags.
+> **On ARM64 Linux (AWS Graviton, Ampere, Raspberry Pi, aarch64 VMs)** grab the
+> `linux-aarch64` archive from the same Releases page — it is built on the
+> portable `armv8-a` baseline, so it runs on any aarch64 host. Build from
+> source instead (sections 1 and 2, unchanged — no ARM-specific flags needed)
+> if you want a binary tuned to *your* cores.
 
 ### Linux (Ubuntu / Debian)
 

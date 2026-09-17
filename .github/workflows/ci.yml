@@ -185,6 +185,14 @@ jobs:
             name: linux
             shell: bash
             v4: "1"
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
+            shell: bash
+            # F-10: the engine list the linux-aarch64 release archive ships.
+            # aarch64 Linux is COLI_V4_SUPPORTED, so deepseek-v4 builds here,
+            # and this leg is what proves that list on ARM before a release
+            # is assembled rather than at tag time.
+            v4: "1"
           - os: macos-latest
             name: macos
             shell: bash

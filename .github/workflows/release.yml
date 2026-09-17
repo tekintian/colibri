@@ -17,6 +17,22 @@ jobs:
             ext: ""
             make_args: "ARCH=x86-64-v3"
             v4: "1"
+          - os: ubuntu-24.04-arm
+            name: linux-aarch64
+            ext: ""
+            # ARCH=armv8-a is the Makefile's own portable baseline for aarch64
+            # (PORTABLE_ARCH, the analogue of the x86 leg's x86-64-v3): NEON is
+            # baseline on armv8-a and the dotprod/i8mm int8-int4 kernels are
+            # gated per-feature in the sources, so this archive runs on any
+            # aarch64 Linux host. The default (native) would bake the runner's
+            # ISA in and SIGILL on weaker cores -- a Raspberry Pi 4 has neither
+            # extension.
+            make_args: "ARCH=armv8-a"
+            # aarch64 Linux is COLI_V4_SUPPORTED like x86-64 Linux, so the
+            # DeepSeek V4 engine builds and ships in this archive too (the
+            # ubuntu-24.04-arm runner label is already proven by ci.yml's
+            # oracle-arm job).
+            v4: "1"
           - os: macos-latest
             name: macos-arm64
             ext: ""
