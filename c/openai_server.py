@@ -3647,6 +3647,17 @@ class APIHandler(BaseHTTPRequestHandler):
                 None, "forbidden")
 
     def read_json(self):
+        # #SEC-9 (M-1): browsers can only issue a cross-site "simple request" -- one
+        # that sends no preflight -- with a Content-Type of text/plain, multipart/*
+        # or x-www-form-urlencoded. None of those is a JSON API client; rejecting
+        # them here makes a hostile page unable to blind-POST a prompt at this
+        # gateway even where other CSRF defences (CORS is not one) do not apply.
+        # An empty Content-Type still passes: non-browser clients (curl, coli)
+        # routinely omit it and, being outside the browser SOP, cannot CSRF us.
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if ctype not in ("", "application/json"):
+            raise APIError(415, "Content-Type must be application/json.", None,
+                           "unsupported_media_type")
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
