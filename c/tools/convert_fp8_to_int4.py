@@ -24,12 +24,81 @@ USO:
   python3 tools/convert_fp8_to_int4.py --selftest
   # reale: scarica+converte+cancella shard per shard
   python3 tools/convert_fp8_to_int4.py --repo zai-org/GLM-5.2-FP8 --outdir /path/to/glm52_i4
+
+DOWNLOAD SOURCES (China-friendly):
+  HF_ENDPOINT=https://hf-mirror.com python3 tools/convert_fp8_to_int4.py ...
+      hf_hub_download already honored HF_ENDPOINT; now the raw-URL paths (the
+      multi-stream shard downloader and the index.json fetches) honor it too.
+  COLI_DL_SOURCE=ms  -> download shards straight from ModelScope (known
+      mapping: zai-org/GLM-5.2-FP8 -> ZhipuAI/GLM-5.2-FP8; GLM_MS_REVISION
+      pins the revision, default "master").
+  COLI_DL_SOURCE=auto (default) -> try HF first; on a network-layer failure
+      (URLError, not an HTTP status like 404) retry once on the ModelScope
+      mirror (index fetches and the single-stream path).
 """
 import os, sys, glob, json, shutil, argparse, threading
 import numpy as np
 
 
 _positioned_write_lock = threading.Lock()
+
+
+# ---------- download source selection (F-16) ----------
+# The raw-URL downloads (shards + model.safetensors.index.json) used to hardcode
+# https://huggingface.co, which is slow or unreachable from many networks.
+# hf_hub_download already honors HF_ENDPOINT; these helpers extend that to the
+# raw URLs, add an explicit ModelScope source, and an auto mirror fallback for
+# the repos in MS_REPO_MAP.
+HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+MS_ENDPOINT = "https://modelscope.cn"
+MS_REPO_MAP = {"zai-org/GLM-5.2-FP8": "ZhipuAI/GLM-5.2-FP8"}
+DL_SOURCE = os.environ.get("COLI_DL_SOURCE", "auto")  # auto | hf | ms
+
+
+def coli_file_url(repo, fn):
+    """Raw-file URL for repo/fn honoring HF_ENDPOINT and COLI_DL_SOURCE."""
+    if DL_SOURCE == "ms":
+        ms_repo = MS_REPO_MAP.get(repo, repo)
+        rev = os.environ.get("GLM_MS_REVISION", "master")
+        return f"{MS_ENDPOINT}/models/{ms_repo}/resolve/{rev}/{fn}"
+    rev = os.environ.get("GLM_HF_REVISION", "main")
+    return f"{HF_ENDPOINT}/{repo}/resolve/{rev}/{fn}"
+
+
+def coli_alt_url(url):
+    """ModelScope mirror of a HF URL, or None (non-auto mode / unknown repo).
+
+    MS_REPO_MAP is intentionally tiny: the fallback must not silently serve a
+    repo nobody verified lives byte-identically on the mirror."""
+    if DL_SOURCE != "auto":
+        return None
+    fn = url.rsplit("/", 1)[-1]
+    rev = os.environ.get("GLM_HF_REVISION", "main")
+    for repo, ms_repo in MS_REPO_MAP.items():
+        if url == f"{HF_ENDPOINT}/{repo}/resolve/{rev}/{fn}":
+            ms_rev = os.environ.get("GLM_MS_REVISION", "master")
+            return f"{MS_ENDPOINT}/models/{ms_repo}/resolve/{ms_rev}/{fn}"
+    return None
+
+
+def coli_fetch(url, timeout=30):
+    """GET a small file, retrying once on the ModelScope mirror (auto mode).
+
+    Only a network-layer failure (URLError that is not an HTTP status such as
+    404) triggers the fallback: a missing file must stay an error, not become
+    a silent mirror hop."""
+    import urllib.request, urllib.error
+    try:
+        return urllib.request.urlopen(url, timeout=timeout).read()
+    except urllib.error.HTTPError:
+        raise
+    except urllib.error.URLError:
+        alt = coli_alt_url(url)
+        if alt is None:
+            raise
+        print(f"[dl] HF unreachable, trying ModelScope mirror: "
+              f"{url.rsplit('/', 1)[-1]}", flush=True)
+        return urllib.request.urlopen(alt, timeout=timeout).read()
 
 
 # ---------- guardia di famiglia (#1304) ----------
@@ -900,7 +969,7 @@ def main():
         EN: home line. Small files, COLI_DL_STREAMS=1 or a legacy .part -> single-stream
         EN: path (_download_single)."""
         import time as _t, threading, urllib.request, urllib.error
-        url = f"https://huggingface.co/{repo}/resolve/main/{fn}"
+        url = coli_file_url(repo, fn)
         out = os.path.join(dest, fn); part = out + ".part"; side = part + ".seg"
         os.makedirs(dest, exist_ok=True)
         expected = SIZES.get(fn)
@@ -990,6 +1059,8 @@ def main():
         EN: arrives, back off instead of spinning."""
         import time as _t, urllib.request, urllib.error
         t0 = _t.time(); nres = 0; mark = 0; tmark = t0
+        alt = coli_alt_url(url)   # auto mode: HF -> ModelScope mirror on network failure
+        tried_alt = False
         while True:
             have = os.path.getsize(part) if os.path.exists(part) else 0
             if expected is not None and have >= expected: break
@@ -1029,7 +1100,25 @@ def main():
                 nres += 1
                 print(f"    [dl] HTTP {ex.code} at {have/1e9:.2f} GB: resuming (#{nres})", flush=True)
                 _t.sleep(min(15, 1 + nres))
+            except urllib.error.URLError as ex:   # rete giu' (DNS/connect), NON un HTTP status
+                if alt and not tried_alt:         # EN: network down (DNS/connect), not an HTTP status
+                    tried_alt = True
+                    print(f"    [dl] HF unreachable, trying ModelScope mirror: {fn}", flush=True)
+                    url = alt
+                    # il mirror puo' puntare a un commit diverso: via il .part, niente Range resume
+                    # EN: the mirror may sit at a different commit: drop .part, no Range resume
+                    if os.path.exists(part): os.remove(part)
+                    continue
+                nres += 1
+                print(f"    [dl] {type(ex).__name__} at {have/1e9:.2f} GB: resuming (#{nres})", flush=True)
+                _t.sleep(min(15, 1 + nres))
             except Exception as ex:
+                if alt and not tried_alt:
+                    tried_alt = True
+                    print(f"    [dl] HF unreachable, trying ModelScope mirror: {fn}", flush=True)
+                    url = alt
+                    if os.path.exists(part): os.remove(part)
+                    continue
                 nres += 1
                 print(f"    [dl] {type(ex).__name__} at {have/1e9:.2f} GB: resuming (#{nres})", flush=True)
                 _t.sleep(min(15, 1 + nres))
@@ -1068,9 +1157,8 @@ def main():
                   "group_size": a.group_size, "n_layers": a.n_layers, "bits_map": bits_map,
                   "proj_bits": dict(PROJ_BITS)}
         if not check_or_record_params(a.outdir, "out-mtp-", params): return
-        import urllib.request
-        idx = json.loads(urllib.request.urlopen(
-            f"https://huggingface.co/{a.repo}/resolve/main/model.safetensors.index.json", timeout=30).read())["weight_map"]
+        idx = json.loads(coli_fetch(
+            coli_file_url(a.repo, "model.safetensors.index.json")))["weight_map"]
         pref = f"model.layers.{a.n_layers}."
         mtp_shards = sorted(set(v for k, v in idx.items() if k.startswith(pref)))
         print(f"[MTP] head at layer {a.n_layers}: {len(mtp_shards)} shards to process: {mtp_shards}")
@@ -1091,9 +1179,8 @@ def main():
                   "group_size": a.group_size, "n_layers": a.n_layers, "bits_map": bits_map,
                   "proj_bits": dict(PROJ_BITS)}
         if not check_or_record_params(a.outdir, "out-idx-", params): return
-        import urllib.request
-        idx = json.loads(urllib.request.urlopen(
-            f"https://huggingface.co/{a.repo}/resolve/main/model.safetensors.index.json", timeout=30).read())["weight_map"]
+        idx = json.loads(coli_fetch(
+            coli_file_url(a.repo, "model.safetensors.index.json")))["weight_map"]
         idx_shards = sorted(set(v for k, v in idx.items()
                                 if "indexer" in k and 0 <= layer_idx(k) < a.n_layers))
         tot_gb = len(idx_shards) * 5.4
