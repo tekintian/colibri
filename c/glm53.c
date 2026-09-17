@@ -2611,7 +2611,17 @@ static int serve_read_req(ServeReq *q, char *verb, size_t verb_size) {
         strcpy(verb, "BAD_FRAME");
         return 1;
     }
-    if (q->plen < 0 || q->plen > (1 << 24)) { strcpy(verb, "BAD_FRAME"); return 1; }
+    /* L-5: gli stessi limiti del parser condiviso (decode_batch.h) — slot e
+     * budget sane, temp/top_p finite e nei range. / EN: mirror the shared
+     * SUBMIT parser's validation so a hostile gateway cannot smuggle a NaN
+     * temperature or an unbounded generation budget through this engine. */
+    if (q->plen < 0 || q->plen > (1 << 24) ||
+        q->slot < 0 || q->max_tokens < 1 ||
+        !isfinite(q->temp) || q->temp < 0 || q->temp > 2 ||
+        !isfinite(q->top_p) || q->top_p <= 0 || q->top_p > 1) {
+        strcpy(verb, "BAD_FRAME");
+        return 1;
+    }
     q->payload = malloc((size_t)q->plen + 1);
     if (!q->payload) { strcpy(verb, "BAD_FRAME"); return 1; }
     if (q->plen && fread(q->payload, 1, (size_t)q->plen, stdin) != (size_t)q->plen) {
