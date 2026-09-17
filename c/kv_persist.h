@@ -166,7 +166,15 @@ static int kv_disk_load(Model *m, int *hist, int maxctx){
     /* v1 f32 sotto KV8/KV_TQ: righe f32 lette in staging e quantizzate al volo */
     float *stage = ((g_kv8||g_tq)&&dt==0) ? falloc(c->kv_lora>c->qk_rope?c->kv_lora:c->qk_rope) : NULL;
     for(int p=0;p<nrec;p++){
-        int32_t tk; if(fread(&tk,4,1,f)!=1){ nrec=p; break; } hist[p]=tk;
+        /* L-2: id fuori [0,vocab) = file corrotto, non un prompt valido.
+         * EN: an out-of-range token id means corruption — cut at the last good
+         * turn instead of feeding the sampler a bogus id. */
+        int32_t tk; if(fread(&tk,4,1,f)!=1){ nrec=p; break; }
+        if(tk<0||tk>=c->vocab){
+            fprintf(stderr,"[KV] corrupt .coli_kv (token id out of range at %d): starting over from the last good turn\n",p);
+            nrec=p; goto out;
+        }
+        hist[p]=tk;
         for(int i=0;i<c->n_layers;i++){
             if(dt==2){                                /* v3: byte polari + raggio, gia' nel formato in RAM */
                 int lbb=coli_kvq_row_bytes(c->kv_lora,g_tq_bits,g_tq_codec), rbb=coli_kvq_row_bytes(c->qk_rope,g_tq_bits,g_tq_codec);
