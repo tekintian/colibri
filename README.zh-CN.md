@@ -217,7 +217,7 @@ MTP head 必须是 **int8**（int4 head 的接受率会崩塌到 0–4%，见
 [Releases](https://github.com/JustVugg/colibri/releases) 下载对应平台的压缩包并解压：
 
 ```bash
-mkdir colibri && tar xzf colibri-v1.8.0-linux-x86_64.tar.gz -C colibri && cd colibri
+mkdir colibri && tar xzf colibri-v1.11.0-linux-x86_64.tar.gz -C colibri && cd colibri
 python3 coli info                         # engine ready ✓
 ```
 

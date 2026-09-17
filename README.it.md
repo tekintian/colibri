@@ -256,7 +256,7 @@ compilatore necessario. Prendi l'archivio della tua piattaforma dalla pagina
 [Releases](https://github.com/JustVugg/colibri/releases) e scompattalo:
 
 ```bash
-mkdir colibri && tar xzf colibri-v1.8.0-linux-x86_64.tar.gz -C colibri && cd colibri
+mkdir colibri && tar xzf colibri-v1.11.0-linux-x86_64.tar.gz -C colibri && cd colibri
 python3 coli info                         # engine ready ✓
 ```
 

@@ -35,7 +35,7 @@ CPU-only by default.
 > launcher finds it next to itself — no compiler, no renaming, no configuration.
 >
 > ```bash
-> mkdir colibri && tar xzf colibri-v1.1.0-linux-x86_64.tar.gz -C colibri && cd colibri
+> mkdir colibri && tar xzf colibri-v1.11.0-linux-x86_64.tar.gz -C colibri && cd colibri
 > python3 coli info        # engine ready ✓
 > ```
 >
