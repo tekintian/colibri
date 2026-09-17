@@ -3571,6 +3571,9 @@ class APIHandler(BaseHTTPRequestHandler):
         data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        # #SEC-10 (L-3): IE/old Edge content-sniffing once turned a JSON error
+        # body into HTML execution; nosniff pins the declared type.
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(data)))
         if request_id:
             self.send_header("x-request-id", request_id)
@@ -3717,6 +3720,8 @@ class APIHandler(BaseHTTPRequestHandler):
         data = target.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        # #SEC-10 (L-3): guessed types over operator-served files get no sniffing.
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(data)))
         self.send_cors_headers()
         self.end_headers()
