@@ -1332,8 +1332,13 @@ class HTTPTest(unittest.TestCase):
                 self.assertEqual(json.load(response), {"seq": 0, "turns": []},
                                  "unauthenticated caller received telemetry")
             with self.request("/profile") as response:
-                self.assertEqual(json.load(response), {"seq": 1, "turns": [turn]},
-                                 "authenticated caller lost access")
+                profile = json.load(response)
+            # exact-equality retired when /profile gained its rolling `latency`
+            # block (F-13): count/p50/p99 vary with whatever else this pytest
+            # process has served, so assert the telemetry fields instead.
+            self.assertEqual((profile["seq"], profile["turns"]), (1, [turn]),
+                             "authenticated caller lost access")
+            self.assertIn("latency", profile)
         finally:
             del self.engine.profile, self.engine.profile_seq
 

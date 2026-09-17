@@ -55,6 +55,23 @@ DEFAULT_CORS_ORIGINS = (
     "tauri://localhost",
 )
 
+# Rolling request telemetry (F-13) for /metrics and /profile: completed-request
+# wall-times plus a monotonic count, lock-guarded because ThreadingHTTPServer
+# serves every connection on its own thread. The deque caps the window so a
+# long-lived gateway's memory does not grow with its request count.
+REQUEST_STATS_LOCK = threading.Lock()
+REQUEST_LATENCIES = collections.deque(maxlen=512)   # completed request wall-times (s)
+REQUEST_COUNT = [0]                                  # completed requests (POST/GET)
+SERVER_START = [time.time()]
+
+
+def _percentile(sorted_vals, q):
+    """Nearest-rank quantile of an already-sorted list; None when empty."""
+    if not sorted_vals:
+        return None
+    idx = max(0, min(len(sorted_vals) - 1, int(round(q * (len(sorted_vals) - 1)))))
+    return sorted_vals[idx]
+
 
 class APIError(Exception):
     def __init__(self, status, message, param=None, code=None, error_type="invalid_request_error",
@@ -3479,6 +3496,24 @@ class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("[api] %s - %s\n" % (self.address_string(), fmt % args))
 
+    def _finish_request(self):
+        """F-13: per-request bookkeeping once the responder returns -- bump the count,
+        record the wall-time, then hand off to the opt-in audit trail. Called from a
+        `finally`, so aborted and failed requests are measured too, not just the
+        happy path. A handler instance serves many keep-alive requests; _req_t0 is
+        reset by each do_GET/do_POST before it runs."""
+        t0 = getattr(self, "_req_t0", None)
+        if t0 is None:
+            return
+        duration = time.time() - t0
+        with REQUEST_STATS_LOCK:
+            REQUEST_COUNT[0] += 1
+            REQUEST_LATENCIES.append(duration)
+        self._audit_log()
+
+    def _audit_log(self):
+        pass   # F-12 fills this in: opt-in JSONL audit line, COLI_AUDIT_LOG
+
     def handle_one_request(self):
         """Per-request bookkeeping for HTTP/1.1 persistence (#597 item 3).
 
@@ -3730,6 +3765,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         request_id = "req_" + uuid.uuid4().hex
+        self._req_t0 = time.time()
         try:
             self._check_host()
             path = urlsplit(self.path).path
@@ -3769,7 +3805,57 @@ class APIHandler(BaseHTTPRequestHandler):
                 if self._is_authed() and eng:
                     payload["seq"] = getattr(eng, "profile_seq", 0)
                     payload["turns"] = list(getattr(eng, "profile", ()) or ())
+                    # F-13: rolling HTTP layer latency alongside the engine-phase
+                    # telemetry, over the same 512-request window /metrics reports.
+                    with REQUEST_STATS_LOCK:
+                        lat = sorted(REQUEST_LATENCIES)
+                    payload["latency"] = {
+                        "count": REQUEST_COUNT[0],
+                        "p50_ms": round(_percentile(lat, 0.50) * 1000, 1) if lat else None,
+                        "p99_ms": round(_percentile(lat, 0.99) * 1000, 1) if lat else None,
+                    }
                 self.send_json(200, payload, request_id)
+                return
+            if path == "/metrics":
+                # F-13: Prometheus scrape endpoint -- uptime, completed-request
+                # count, p50/p99 wall-time quantiles, scheduler queue depth.
+                # Same trust level as /v1/models: key-gated when --api-key is set.
+                self.require_auth()
+                with REQUEST_STATS_LOCK:
+                    lat = sorted(REQUEST_LATENCIES)
+                    count = REQUEST_COUNT[0]
+                p50 = _percentile(lat, 0.50); p99 = _percentile(lat, 0.99)
+                lines = [
+                    "# HELP colibri_uptime_seconds Seconds since gateway start.",
+                    "# TYPE colibri_uptime_seconds gauge",
+                    f"colibri_uptime_seconds {time.time() - SERVER_START[0]:.3f}",
+                    "# HELP colibri_http_requests_total Completed HTTP requests.",
+                    "# TYPE colibri_http_requests_total counter",
+                    f"colibri_http_requests_total {count}",
+                    "# HELP colibri_http_request_duration_seconds Request wall-time quantiles.",
+                    "# TYPE colibri_http_request_duration_seconds summary",
+                ]
+                if p50 is not None:
+                    lines.append(f'colibri_http_request_duration_seconds{{quantile="0.5"}} {p50:.6f}')
+                if p99 is not None:
+                    lines.append(f'colibri_http_request_duration_seconds{{quantile="0.99"}} {p99:.6f}')
+                if lat:
+                    lines.append(f"colibri_http_request_duration_seconds_sum {sum(lat):.6f}")
+                    lines.append(f"colibri_http_request_duration_seconds_count {len(lat)}")
+                try:
+                    sched = self.server.scheduler.snapshot()
+                    lines += ["# HELP colibri_scheduler_queue_depth Waiting requests.",
+                              "# TYPE colibri_scheduler_queue_depth gauge",
+                              f"colibri_scheduler_queue_depth {sched.get('queued', 0)}"]
+                except Exception:
+                    pass
+                body = ("\n".join(lines) + "\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
                 return
             if self.serve_static(path):
                 return
@@ -3783,6 +3869,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise APIError(404, "Not found.", None, "not_found")
         except APIError as error:
             self.send_json(error.status, error_object(error), request_id, error.headers)
+        finally:
+            self._finish_request()
 
     def do_OPTIONS(self):
         try:                                   # (#SEC-7) apply the Host guard uniformly, incl. CORS preflight
@@ -3799,6 +3887,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         request_id = "req_" + uuid.uuid4().hex
+        self._req_t0 = time.time()
         try:
             self._check_host()
             self.require_auth()
@@ -3826,6 +3915,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                     None, "engine_error", "server_error"), request_id)
             except OSError:
                 pass
+        finally:
+            self._finish_request()
 
     def _fail(self, error, request_id):
         """Report an error, unless the response is already on the wire. Once a streaming 200
