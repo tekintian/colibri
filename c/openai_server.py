@@ -3512,7 +3512,30 @@ class APIHandler(BaseHTTPRequestHandler):
         self._audit_log()
 
     def _audit_log(self):
-        pass   # F-12 fills this in: opt-in JSONL audit line, COLI_AUDIT_LOG
+        """F-12: opt-in JSONL audit trail (COLI_AUDIT_LOG / --audit-log). One line per
+        completed request: when, which peer, which path, status, duration. Deliberately
+        NOTHING else is recorded -- no request body, no prompt or completion text, no
+        API key -- so the file stays safe to hand to a log shipper. Auditing must never
+        take the request path down, so I/O failures are swallowed."""
+        path = os.environ.get("COLI_AUDIT_LOG")
+        if not path:
+            return
+        try:
+            status = getattr(self, "_audit_status", None)
+            entry = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "ip": self.client_address[0] if self.client_address else "",
+                "method": self.command,
+                "path": urlsplit(self.path).path,
+                "status": status,
+                "duration_ms": round((time.time() - self._req_t0) * 1000, 1)
+                              if getattr(self, "_req_t0", None) else None,
+                "model": getattr(self.server, "model_id", None),
+            }
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass   # auditing must never take the request path down
 
     def handle_one_request(self):
         """Per-request bookkeeping for HTTP/1.1 persistence (#597 item 3).
@@ -3567,6 +3590,7 @@ class APIHandler(BaseHTTPRequestHandler):
         """Single choke point for "the status line is out". Overriding here rather than
         tracking it at each call site means no responder can forget (#597 item 3)."""
         self._committed = True
+        self._audit_status = code   # F-12: remembered for the opt-in JSONL audit line
         # The request is fully read by the time anything answers, so the read
         # deadline has done its job. Restore the plain per-operation timeout:
         # generation legitimately takes minutes and must not inherit a clock
@@ -4687,6 +4711,9 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model-id", default=os.environ.get("COLI_MODEL_ID"))
     parser.add_argument("--api-key", default=os.environ.get("COLI_API_KEY"))
+    parser.add_argument("--audit-log", default=os.environ.get("COLI_AUDIT_LOG"),
+                        help="append a JSONL audit line per request (path; no prompt "
+                             "content is logged); also set via COLI_AUDIT_LOG")
     parser.add_argument("--cors-origin", action="append", default=None,
                         help="allowed browser origin; repeat as needed (use '*' for any origin)")
     # Absent = not explicitly set: mirrors coli's --cap (see cap_for_arch and issue
@@ -4704,6 +4731,11 @@ def main():
              "(reverse proxy / MagicDNS in front of the loopback bind); repeat as needed, "
              "or set COLI_ALLOWED_HOSTS as a comma-separated list")
     args = parser.parse_args()
+    # F-12: the audit writer deep in the handler reads COLI_AUDIT_LOG, so the CLI
+    # flag just lands in that environment variable. No prompt content is logged.
+    if args.audit_log:
+        os.environ["COLI_AUDIT_LOG"] = args.audit_log
+        print(f"audit log: appending one JSONL line per request to {args.audit_log}")
     try:
         resolved = resolve_model(args.model)
     except (FamilyConfigError, UnknownFamilyError) as error:
