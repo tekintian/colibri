@@ -40,7 +40,7 @@ may reduce speed; it must not quietly redefine the model.
 
 ```
 $ ./coli chat
-  🐦 colibri v1.11.0 — GLM-5.2 · 744B MoE · int4 · streaming CPU
+  🐦 colibri v1.12.0 — GLM-5.2 · 744B MoE · int4 · streaming CPU
   ✓ ready in 32s · resident 9.9 GB
   › ciao!
   ◆ Ciao! 😊 Come posso aiutarti oggi?
@@ -51,23 +51,38 @@ $ ./coli chat
 <p align="center">
   <img src="docs/media/colibri-dashboard.png" width="900" alt="colibrì web dashboard — live metrics, hardware panel, expert tiers">
 </p>
-<p align="center"><em>The web dashboard (<code>./coli web</code>): a 744B model at <strong>4 tok/s, TTFT 1.6 s, disk 0</strong> —
-full expert residency on 6× RTX 5090, with live token metrics, the per-turn time breakdown,
-the VRAM/RAM/disk tier bar and the live mini-brain in the corner.</em></p>
+<p align="center"><em>The web dashboard (<code>./coli web</code>), redesigned in 1.12.0: a workspace with a dock for the chat,
+Brio mode, the Brain page and Profiling, in a light or a dark theme. Here Qwen3.6 answering on a CPU box,
+experts streamed from disk.</em></p>
 
 <p align="center">
-  <img src="docs/media/colibri-brain.png" width="900" alt="the Brain page — 19,456 experts as a live cortex">
+  <img src="docs/media/colibri-brio.png" width="900" alt="the Brio page: a document read once, a probability for every allowed answer, and an entropy">
 </p>
-<p align="center"><em>The <strong>Brain</strong> page: all 19,456 experts as a living cortex — colour is the storage tier,
-brightness is routing heat, and every expert routed in a turn flashes white. Hovering shows the expert's
-<a href="https://github.com/JustVugg/colibri/issues/175">measured topic affinity</a>.</em></p>
+<p align="center"><em><strong>Brio mode</strong>: the same model, told to stop writing. Give it a document and the only answers
+it may pick; it reads the probability of each one, generates nothing, and reports an entropy that says when it is
+not sure. Here: <strong>request changes at 99.9%</strong>, entropy 0.005, 4 tokens read, 0 generated.</em></p>
 
 <p align="center">
-  <img src="docs/media/colibri-atlas.png" width="900" alt="the Atlas page — the measured expert atlas as a 3-D galaxy">
+  <img src="docs/media/colibri-brain.png" width="900" alt="the Brain page: the measured expert atlas of GLM-5.2 drawn as a cortex, ten regions to enter">
 </p>
-<p align="center"><em>The <strong>Atlas</strong> page: the <a href="https://github.com/JustVugg/colibri/issues/175">measured expert atlas</a>
-as a 3-D galaxy — 13,260 characterised experts, 1,041 replicated specialists clustering by topic
-(poetry, law, Chinese, SQL…). Position is measured routing affinity, not a learned embedding. Drag to spin.</em></p>
+<p align="center"><em>The <strong>Brain</strong> page, <strong>Explore</strong>: the <a href="https://github.com/JustVugg/colibri/issues/175">measured expert atlas</a> of GLM-5.2
+drawn as a cortex. 13,260 characterised experts in ten regions (Python, SQL, mathematics, poetry, law, Chinese…);
+position is measured routing affinity, not a learned embedding. Choose a region to enter it. <strong>Live routing</strong> switches
+to the model actually running: one cell per expert, colour is the storage tier, and every expert routed in a turn flashes white.</em></p>
+
+<p align="center">
+  <img src="docs/media/colibri-brain-region.png" width="900" alt="inside the Python region: 1,142 experts, one of them selected with its measured affinities">
+</p>
+<p align="center"><em>Inside the <strong>Python</strong> region: 1,142 experts as a constellation, each labelled by layer and index. The panel shows
+one of them, layer 17 expert 178: a generalist with entropy 3.13, whose measured affinity is 20.2% Python, 14.6% JSON,
+14.2% conversation, 13.3% SQL.</em></p>
+
+<p align="center">
+  <img src="docs/media/colibri-profiling.png" width="900" alt="the Profiling page: where the engine spends each turn">
+</p>
+<p align="center"><em>The <strong>Profiling</strong> page: where the engine spends each turn, by phase, with the last 30 turns as a trend.
+Here Qwen3.6 on a CPU box: 19.0 s of wall time for 36 prompt and 55 generated tokens, 2.9 tok/s, 11.4 s of disk
+service overlapped with compute.</em></p>
 
 ## The research mission
 
@@ -131,7 +146,7 @@ hardware, commit, model/container, exact command, prompt, cache state, throughpu
 TTFT, expert hit rate, bytes read, and quality check; change one variable, repeat
 the run, and attach raw logs. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md), compare against
-[the benchmark protocol](docs/benchmarks.md), then
+[the benchmark protocol](docs/benchmarking.md), then
 [open an experiment issue](https://github.com/JustVugg/colibri/issues/new).
 A well-controlled failure is more valuable here than an unexplained fast number.
 
@@ -374,6 +389,12 @@ so put it on a disk with the room, ideally a fast one:
 
 **https://huggingface.co/mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp**
 
+**GLM-5.3** is the same family and loads with the same engine. It has its own
+container, also group-scaled (gs64), about **419 GB**. It ships **without** the
+MTP head, so speculative decoding stays off:
+
+**https://huggingface.co/Justvugg/GLM-5.3-colibri-int4-g64**
+
 > ⚠️ Use the **gs64** container above, not the older per-row int4 mirrors
 > (`mateogrgic/…`, `jlnsrk/…`): those measure ~9pp worse on quality and are the
 > root cause of the original think-mode loops and never-terminating generations
@@ -381,7 +402,10 @@ so put it on a disk with the room, ideally a fast one:
 > fixed those controlled per-row A/Bs, but it is not a general repetition or
 > EOS-starvation guard. The MTP head must also be **int8, not int4**
 > (int4 → 0% draft acceptance, [#8](https://github.com/JustVugg/colibri/issues/8)):
-> `ls -l <model>/out-mtp-*` — int8 (correct) is `3527131672 / 5366238584 / 1065950496`.
+> `ls -l <model>/out-mtp-*` — int8 (correct) is `3527131672 / 5366238584 / 1065950496`
+> as three files, or a single `out-mtp-00000.safetensors` of `9959321520` bytes
+> (the current upload of the recommended container ships it as one file: same
+> int8 tensors, 777 of them at one byte per element).
 
 Or convert from the FP8 source yourself — one resumable command that never needs
 the full 756 GB on disk at once:
@@ -405,7 +429,7 @@ the model's `config.json`):
 > | Model | Disk for the weights | RAM | GPU |
 > |---|---|---|---|
 > | **OLMoE** | ~7 GB (int8 container) | 8 GB | not needed |
-> | **GLM-5.2/5.3** | ~372 GB | 16 GB min, 24 GB comfortable | not needed |
+> | **GLM-5.2/5.3** | ~372 GB (5.2) / ~419 GB (5.3) | 16 GB min, 24 GB comfortable | not needed |
 > | **GLM-5.3-Flash** | ~195 GB converted | 25 GB (12 GB weights at int4 + expert cache) | not needed |
 > | **Inkling** | ~469 GB | 25 GB with the int4 dense container, ~120 GB without | not needed |
 > | **Kimi K3** | ~1.6 TB | 32 GB+ | not needed |
@@ -419,7 +443,7 @@ the model's `config.json`):
 
 | Family | Total / active | Weights | Build | Docs |
 |---|---|---|---|---|
-| **GLM-5.2/5.3** | 744B / 40B | [`mastouri/…-int4-g64-with-int8-mtp`](https://huggingface.co/mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp) (372 GB) | `make -C c glm` | this page |
+| **GLM-5.2/5.3** | 744B / 40B | [`mastouri/…-int4-g64-with-int8-mtp`](https://huggingface.co/mastouri/GLM-5.2-colibri-int4-g64-with-int8-mtp) (372 GB) or [`Justvugg/GLM-5.3-colibri-int4-g64`](https://huggingface.co/Justvugg/GLM-5.3-colibri-int4-g64) (419 GB) | `make -C c glm` | this page |
 | **Inkling** (Thinking Machines) | 975B / 41B | [`nbeerbower/Inkling-colibri-int4`](https://huggingface.co/nbeerbower/Inkling-colibri-int4) (469 GB) | `make -C c inkling` | [inkling.md](docs/inkling.md) |
 | **GLM-5.3-Flash** (Z.ai) | 321B / 40B | [`zai-org/GLM-5.3-Flash`](https://huggingface.co/zai-org/GLM-5.3-Flash) — converted to **int4-gs64** routed experts, dense stays BF16 and the precision is a load-time choice; vision included | `make -C c glm53` | [glm53-flash.md](docs/glm53-flash.md) |
 | **Kimi K3** (Moonshot) | 2.8T / 104B | [`moonshotai/Kimi-K3`](https://huggingface.co/moonshotai/Kimi-K3) — original checkpoint, routed experts stay **native MXFP4** | `make -C c kimi_k3` | [kimi_k3.md](docs/kimi_k3.md) |
@@ -463,6 +487,39 @@ COLI_MODEL=/nvme/glm52_i4 ./coli tune     # measure and save this machine's fast
 ./coli web  --model /nvme/glm52_i4        # API + dashboard, and opens a browser
 ./coli serve --model /nvme/glm52_i4       # API + dashboard, no browser (headless)
 ```
+
+#### Brio mode: ask a closed question
+
+Most of what people ask a model for is a choice, not a paragraph: which queue,
+which verdict, which of the four values a field may take. Brio mode hands the
+engine the options and reads the probability of each one instead of
+generating: `completion_tokens` is 0, no answer can fall outside your list,
+and every answer comes with an entropy, so "the model is not sure" is a
+number you can put a threshold on. It runs on all nine families, on the same
+server, and it is opt-in per request: chat is byte-identical for everyone who
+does not ask for it.
+
+```bash
+# in the TUI: the same model, told to stop writing
+./coli chat --model /nvme/qwen36_i4_gs64
+> /brio merge | request changes | close
+> 340 lines, 8 files, no tests. CI is green but nothing covers that path.
+
+# from anywhere: one JSON request on the running server
+curl -s http://127.0.0.1:8000/v1/brio -H 'Content-Type: application/json' -d '{
+  "model": "qwen36",
+  "state": "340 lines, 8 files, no tests. CI is green but nothing covers that path.",
+  "question": "What should the reviewer do?",
+  "options": ["merge", "request changes", "close"]}'
+```
+
+`questions` asks many things about one document read once, and `schema` fills
+a JSON object one field at a time, valid by construction. Measured on Qwen3.6
+against generating the same answer on the same CPU box: 2.4x on a four-field
+schema, 5.7x on four questions about one document. The whole mode, the
+request and reply shapes, and where it does not help: [docs/brio.md](docs/brio.md).
+The dashboard has a Brio page as well.
+
 
 On Windows a release archive ships `coli.cmd`: double-click it for the quick
 start, or run `coli.cmd chat --model D:\glm52_i4` from cmd or PowerShell.
@@ -512,12 +569,14 @@ Two things that differ per model, both documented in the per-model page:
 | topic | doc |
 |---|---|
 | Benchmarks, community datapoints, quality measurements | [docs/benchmarks.md](docs/benchmarks.md) |
+| Reproducible benchmark protocol and minimum report | [docs/benchmarking.md](docs/benchmarking.md) |
 | Tuning knobs, policies, the learning cache, prefetch | [docs/tuning.md](docs/tuning.md) |
 | Windows 11 native build (+ CUDA DLL) | [docs/windows.md](docs/windows.md) |
 | CUDA backend, VRAM expert tier, full residency | [docs/cuda.md](docs/cuda.md) |
 | Vulkan backend (any GPU: AMD via RADV, incl. cards ROCm dropped) | [docs/vulkan.md](docs/vulkan.md) |
 | Apple Silicon Metal backend | [docs/metal.md](docs/metal.md) |
 | OpenAI-compatible API, KV slots, web dashboard | [docs/api.md](docs/api.md) |
+| Brio mode: score a closed set of options instead of generating | [docs/brio.md](docs/brio.md) |
 | Experimental layer-segment embedding ABI | [docs/segment-runtime.md](docs/segment-runtime.md) |
 | Experimental tokenizer/embedding/head Edge ABI | [docs/edge-runtime.md](docs/edge-runtime.md) |
 | Grammar-forced drafts (structured output) | [docs/grammar-draft.md](docs/grammar-draft.md) |
@@ -617,6 +676,7 @@ c/
 │
 ├── st.h                  safetensors index and range reads
 ├── quant.h               canonical container decoders
+├── expert_ffn.h          routed-expert FFN kernel shared by the MoE engines (planar int4, layer runner)
 ├── tok.h, json.h         tokenizer and JSON parser
 ├── compat.h              Windows/macOS shims (POSIX names, one place)
 ├── expert_store.h        streaming expert cache

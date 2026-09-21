@@ -38,6 +38,8 @@
 #endif
 #include "omp_tune.h"
 #include "route_trace.h"                    /* shared routing telemetry (#700) */
+#include "kv_prefix.h"
+#include "pin_pool.h"                       /* piu scatti annidati */   /* riuso del prefisso tra turni (shared) */
 #include "serve_codec.h"
 #ifdef COLI_SEGMENT_ADAPTER
 #include "segment_runtime.h"
@@ -102,6 +104,10 @@ typedef struct {
      * plain double: a per-turn delta of it is what the PROF line reports. */
     uint64_t disk_ns;
     float **K, **V; int kv_len, max_t;
+    /* What the cached keys and values were built from, so a serve turn that
+     * resends the transcript prefills only the new tail. Recorded where the
+     * tokens are fed (see kv_prefix.h), never derived from a counter. */
+    kv_prefix kvp;
     double dense_load_s;
     /* IMPROVEMENT 2: expert frequency heatmap */
     uint32_t **freq;                   /* per-layer expert counts, owned by route_trace.h */
@@ -211,20 +217,32 @@ static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return
  * budget automatico pari a cio' che il processo gia' tiene: la cache risulta
  * minima invece che sbagliata, e --ram (o --cap) resta la via esplicita. */
 static double mem_available_gb(void) {
-    double avail = 0.0;
-#ifdef __linux__
-    FILE *mi = fopen("/proc/meminfo", "r");
-    if (mi) {
-        char ln[256]; double v = 0;
-        while (fgets(ln, sizeof(ln), mi))
-            if (sscanf(ln, "MemAvailable: %lf", &v) == 1) { avail = v / 1e6; break; }
-        fclose(mi);
-    }
-#elif defined(_SC_AVPHYS_PAGES) && defined(_SC_PAGESIZE)
-    long pages = sysconf(_SC_AVPHYS_PAGES), page = sysconf(_SC_PAGESIZE);
-    if (pages > 0 && page > 0) avail = (double)pages * (double)page / 1e9;
+    /* compat.h's probe knows Linux (MemAvailable), macOS (host_statistics64)
+     * and Windows (GlobalMemoryStatusEx). The Linux-only version that lived
+     * here returned 0 on the other two, and 0 sized the expert cache to one
+     * slot per layer: 2.5x slower without --ram, on every Windows and macOS
+     * benchmark taken since (#1500). */
+    double avail = compat_mem_available_gb();
+    if (avail > 0.0) return avail;
+    /* Not measurable here: say so once and fall back to half the physical RAM
+     * where that is known, else to a small fixed budget, rather than to a
+     * cache that streams every expert from disk on every token. */
+    static int noted = 0;
+    double total = 0.0;
+#ifdef _WIN32
+    double a2 = 0.0; compat_meminfo(&total, &a2);
+#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+    long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && page > 0) total = (double)pages * (double)page / 1e9;
 #endif
-    return avail;
+    double fallback = total > 0.0 ? total * 0.5 : 8.0;
+    if (!noted) {
+        noted = 1;
+        fprintf(stderr, "[olmoe] could not measure available RAM on this platform; assuming %.1f GB "
+                        "(%s). Pass --ram <GB> to set the budget explicitly.\n",
+                fallback, total > 0.0 ? "half the physical RAM" : "a fixed default");
+    }
+    return fallback;
 }
 static float *falloc(int64_t n) { float *p = malloc(n*sizeof(float)); if(!p){fprintf(stderr,"OOM %ld\n",(long)n);exit(1);} return p; }
 
@@ -934,6 +952,14 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     free(logits); free(g); free(u); free(hh);
 }
 
+/* PROF phases (#1449): wall time in attention, in the MoE blocks (expert
+ * loads included) and in the head, plus positions forwarded. The serve loop
+ * reports per-turn deltas; expert_matmul_s is the MoE time minus the disk
+ * seconds measured inside it, clamped at zero; forwards counts step() calls,
+ * so tokens per forward reads 1.0 for this engine. Timing only. */
+static double g_prof_attn_s = 0.0, g_prof_moe_s = 0.0, g_prof_head_s = 0.0;
+static long long g_prof_forwards = 0;
+
 static void layers_forward_range(Model *m, float *x, int S, int pos_base,
                                  int layer_begin, int layer_end,
                                  int allow_prefetch) {
@@ -943,13 +969,17 @@ static void layers_forward_range(Model *m, float *x, int S, int pos_base,
     for (int i = layer_begin; i < layer_end; i++) {
         Layer *l = &m->L[i];
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->in_ln, D, c->eps);
+        double t_attn = now_s();
         attention(m, l, i, nrm, S, pos_base, tmp);
+        g_prof_attn_s += now_s() - t_attn;
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
         /* IMPROVEMENT 1: PILOT=1 -> 1-layer lookahead */
         if (allow_prefetch && g_pilot >= 1 && S <= 8 && i + 1 < c->n_layers)
             pilot_prefetch(m, i + 1, x, S);
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->post_ln, D, c->eps);
+        double t_moe = now_s();
         moe(m, l, i, nrm, S, tmp);
+        g_prof_moe_s += now_s() - t_moe;
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
 
         /* PREDICTION IMPROVEMENT C (Residual gate trick):
@@ -961,6 +991,27 @@ static void layers_forward_range(Model *m, float *x, int S, int pos_base,
         
     }
     free(nrm); free(tmp);
+}
+
+/* Canale logprobs: coda numerica per token, lettura del prefill, fotografia
+ * dello stato. Questo motore e ad attenzione pura, quindi riavvolgere vuol
+ * dire solo dichiarare che il prefisso tenuto e quello fotografato: le righe
+ * KV di quelle posizioni non le ha toccate nessuno. Si salvano gli id e il
+ * vettore di logit finale, che e il predittore del primo token fresco. */
+static int    g_echo_k = 0;
+static const char *g_echo_id = NULL;
+static ColiPinPool g_pins;             /* piu scatti annidati, vedi pin_pool.h */
+static const float *g_pin_logit = NULL; /* logit dello scatto rimesso, se c'e */
+static int    g_pin_use_logit = 0;
+static Tok   *g_echo_tok = NULL;
+
+static void olmoe_echo(const char *id, int pos, int token, const float *lo, int V, int k){
+    char tail[1024]; coli_logprob_tail(tail, sizeof tail, lo, V, token, k);
+    char piece[512]; int n = g_echo_tok ? tok_decode(g_echo_tok, &token, 1, piece, (int)sizeof piece) : 0;
+    if (n < 0) n = 0;
+    printf("ECHO %s %d %d%s\n", id, n, pos, tail);
+    if (n > 0) fwrite(piece, 1, (size_t)n, stdout);
+    fputc('\n', stdout); fflush(stdout);
 }
 
 static float *step(Model *m, const int *ids, int S, int pos_base) {
@@ -985,10 +1036,32 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
     if (!m->hot_pinned && m->hot_n > 0 && m->freq_token_count >= m->warmup_tokens)
         pin_hot_experts(m);
     m->kv_len = pos_base + S;
+    /* Recorded HERE, where the tokens entered the cache: fed[0..len-1] are
+     * the ids those positions were built from, and that invariant is the
+     * whole safety argument for reusing them next turn. */
+    kv_prefix_record(&m->kvp, ids, pos_base, S);
+    /* Lettura del prefill: un passaggio di lm_head per posizione, pagato solo
+     * da chi ha chiesto il canale. La posizione p predice il token p+1; il
+     * primo token fresco e predetto dalla fotografia. Cosi ogni token di
+     * un'opzione ha il suo logprob, anche fuori dai primi k. */
+    if (g_echo_k > 0 && g_echo_id && S > 0) {
+        float *erow = falloc(D), *elog = falloc(c->vocab);
+        if (g_pin_use_logit && g_pin_logit)
+            olmoe_echo(g_echo_id, pos_base, ids[0], g_pin_logit, c->vocab, g_echo_k);
+        for (int p = 0; p + 1 < S; p++) {
+            rmsnorm_row(erow, x + (int64_t)p*D, m->final_norm, D, c->eps);
+            matmul(elog, erow, m->lm_head, 1, D, c->vocab);
+            olmoe_echo(g_echo_id, pos_base + p + 1, ids[p+1], elog, c->vocab, g_echo_k);
+        }
+        free(erow); free(elog);
+    }
     float *last = falloc(D);
     rmsnorm_row(last, x + (int64_t)(S-1)*D, m->final_norm, D, c->eps);
     float *logit = falloc(c->vocab);
+    double t_head = now_s();
     matmul(logit, last, m->lm_head, 1, D, c->vocab);
+    g_prof_head_s += now_s() - t_head;
+    g_prof_forwards += 1;   /* forward passes, not positions: a prefill of S rows is one */
     free(x); free(last);
     return logit;
 }
@@ -1368,7 +1441,8 @@ static void run_chat(Model *m, Tok *T, int ctx_cap) {
  * never touched, the same invariant CHAT mode's /reset already relies on
  * (it clears hist_len, not the K/V buffers themselves). */
 
-typedef struct { char id[64]; int max_tok; float temp, top_p; char *payload; int plen; } SReq;
+typedef struct { char id[64]; int max_tok; float temp, top_p; char *payload; int plen;
+                 int logprobs, pin; } SReq;   /* SUBMIT logprobs=k / pin=1 */
 #define SRV_QMAX 16
 static SReq g_q[SRV_QMAX]; static int g_qn = 0;
 static const ColiServeWireProfile olmoe_wire = {
@@ -1405,6 +1479,8 @@ static int serve_read_cmd(FILE *in, FILE *out, const char *cur_id) {
             SReq *q = &g_q[g_qn++];
             snprintf(q->id, sizeof(q->id), "%s", command.id);
             q->max_tok = command.max_tokens;
+            q->logprobs = command.logprobs;
+            q->pin = command.pin;
             q->temp = command.temperature;
             q->top_p = command.top_p;
             q->payload = (char *)coli_serve_command_take_payload(&command);
@@ -1435,6 +1511,10 @@ static void serve_hits(Model *m) {
     fflush(stdout); free(hex); free(bm);
 }
 
+/* COLI_KV_PREFIX=0: never reuse a previous turn's cache. The escape hatch,
+ * and the B arm of the A/B that shows reuse changes nothing but the time. */
+static int kv_prefix_off(void){ const char *e = getenv("COLI_KV_PREFIX"); return e && *e == '0'; }
+
 static int serve_one(Model *m, Tok *T, SReq *q, int ctx_cap) {
     Cfg *c = &m->c;
     int cap = q->plen + 16;
@@ -1443,23 +1523,89 @@ static int serve_one(Model *m, Tok *T, SReq *q, int ctx_cap) {
     if (np <= 0) { coli_serve_write_error(stdout, q->id, "empty prompt"); free(ids); return 0; }
     if (np + q->max_tok > ctx_cap) {
         char message[128];
-        snprintf(message, sizeof(message), "context exceeds CTX (%d + %d > %d)",
+        /* The frame the gateway turns into a 400 context_length_exceeded
+         * (#506, #1381). Free text here reached the client as a 500. */
+        snprintf(message, sizeof(message),
+                 "CONTEXT_EXCEEDED prompt_tokens=%d requested=%d capacity=%d",
                  np, q->max_tok, ctx_cap);
         coli_serve_write_error(stdout, q->id, message); free(ids); return 0;
     }
     g_temp = q->temp; g_nuc = q->top_p;
+    /* A chat client resends the whole transcript every turn. If this prompt
+     * begins with the ids the cache was built from, those keys and values ARE
+     * the state at those positions -- attention is causal, so a row depends on
+     * its prefix and nothing later. Prefill only the tail. Reuse is all or
+     * nothing: nothing here can rewind a cache. COLI_KV_PREFIX=0 turns it off,
+     * COLI_PREFIX_LOG=1 reports the decision and its reason, because "it did
+     * not get faster" is otherwise indistinguishable from "it is not wired up".
+     *
+     * On a miss the record must be CLEARED and not merely overwritten: a
+     * shorter prompt writes fewer positions than the last one recorded, and
+     * kv_prefix_record only ever grows the length, so the stale tail would
+     * claim coverage the cache no longer has. */
+    int reuse = kv_prefix_off() ? 0 : kv_prefix_reuse(&m->kvp, ids, np);
+    /* La fotografia si prova sempre, non solo quando il riuso vivo fallisce:
+     * altrimenti la prima opzione trova ancora lo stato del prompt, passa dal
+     * riuso normale e il suo primo token resta senza predittore. */
+    g_pin_use_logit = 0; g_pin_logit = NULL;
+    {
+        /* Il piu profondo degli scatti che sia un prefisso di questo prompt.
+         * Con due livelli (istruzioni, istruzioni+domanda) e il secondo a
+         * decidere; se e' morto si ripiega sul primo invece di rifare tutto. */
+        int s = coli_pin_best(&g_pins, ids, np);
+        while (s >= 0) {
+            ColiPin *k = &g_pins.slot[s];
+            if (kv_prefix_holds(&m->kvp, k->ids, k->len)) {
+                kv_prefix_clear(&m->kvp);
+                kv_prefix_record(&m->kvp, k->ids, 0, k->len);
+                m->kv_len = k->len;
+                reuse = k->len;
+                g_pin_logit = k->logit; g_pin_use_logit = k->logit != NULL;
+                coli_pin_touch(&g_pins, s);
+                break;
+            }
+            k->len = 0;                    /* le righe non ci sono piu: scatto orfano */
+            s = coli_pin_best(&g_pins, ids, np);
+        }
+    }
+    g_echo_k = q->logprobs; g_echo_id = q->id; g_echo_tok = T;
+    if (!reuse) kv_prefix_clear(&m->kvp);
+    if (getenv("COLI_PREFIX_LOG")) {
+        if (reuse)
+            fprintf(stderr, "[PREFIX] reusing %d of %d prompt tokens (%.0f%%)\n",
+                    reuse, np, 100.0 * reuse / np);
+        else
+            fprintf(stderr, "[PREFIX] no reuse: held=%d cap=%d prompt=%d\n",
+                    m->kvp.len, m->kvp.cap, np);
+        fflush(stderr);
+    }
     double t0 = now_s();
     uint64_t h0 = m->hits, m0 = m->miss;
     uint64_t disk0 = __atomic_load_n(&m->disk_ns, __ATOMIC_RELAXED);
-    float *logit = step(m, ids, np, 0);
+    double attn0 = g_prof_attn_s, moe0 = g_prof_moe_s, head0 = g_prof_head_s;
+    long long fwd0 = g_prof_forwards;
+    /* `reuse` is the ABSOLUTE position of the first fresh token: attention
+     * and the KV rows are position-indexed, so this has to be the real
+     * offset, not a count of what is left to do. */
+    float *logit = step(m, ids + reuse, np - reuse, reuse);
     int hist_len = np, gen = 0, limited = 1, cancelled = 0;
     char buf[512];
+    if (q->pin && logit) {
+        coli_pin_pool_init(&g_pins, c->vocab);
+        if (coli_pin_store(&g_pins, ids, np, logit)) {
+            fprintf(stderr, "[PIN] scatto a %d token\n", np); fflush(stderr);
+        }
+    }
+    g_echo_k = 0; g_echo_id = NULL;   /* la lettura riguarda il prefill, non la decodifica */
     for (int s = 0; s < q->max_tok && !cancelled; s++) {
         int nt = pick_tok(logit, c->vocab, -1);
+        char lptail[1024]; lptail[0] = 0;
+        if (q->logprobs > 0) coli_logprob_tail(lptail, sizeof lptail, logit, c->vocab, nt, q->logprobs);
         free(logit); logit = NULL;
         if (is_stop(nt)) { limited = 0; break; }
         int nb = tok_decode(T, &nt, 1, buf, sizeof(buf)-1);
-        coli_serve_write_data(stdout, q->id, buf, (size_t)nb);
+        if (q->logprobs > 0) coli_serve_write_data_lp(stdout, q->id, buf, (size_t)nb, lptail);
+        else coli_serve_write_data(stdout, q->id, buf, (size_t)nb);
         gen++; hist_len++;
         while (coli_stdin_readable()) {
             int r = serve_read_cmd(stdin, stdout, q->id);
@@ -1484,15 +1630,18 @@ static int serve_one(Model *m, Tok *T, SReq *q, int ctx_cap) {
         .length_limited = limited,
     };
     coli_serve_write_done(stdout, q->id, &done);
-    /* PROF: per-turn phase timings for the dashboard. The expert disk field is
-     * measured -- it is the one that dominates a streamed turn, and reporting a
-     * literal zero for it told /profile consumers that the reads cost nothing
-     * (#1449). The remaining four are still unmeasured in this engine: olmoe
-     * does not split the rest of its wall time the way glm.c and inkling.c do.
-     * They stay zero rather than being guessed, and the field order is the
-     * protocol's: disk, wait, matmul, attention, lm_head. */
+    /* PROF: per-turn phase timings for the dashboard, field order the protocol's:
+     * disk, wait, matmul, attention, lm_head, forwards. disk is what the expert
+     * loads took (#1449 first half); matmul is the MoE block time minus that
+     * disk time, clamped at zero (the PILOT worker's reads are counted in disk
+     * but happen off the block's clock); attention and lm_head are measured
+     * around their calls; forwards counts positions through step(). wait stays
+     * zero: this engine has no separate wait phase. */
     double disk_s = (double)(__atomic_load_n(&m->disk_ns, __ATOMIC_RELAXED) - disk0) / 1e9;
-    printf("PROF %.3f %d %d %.3f 0.0 0.0 0.0 0.0 %d\n", dt, np, gen, disk_s, gen + 1);
+    double matmul_s = (g_prof_moe_s - moe0) - disk_s; if (matmul_s < 0.0) matmul_s = 0.0;
+    /* microsecond resolution: see qwen36.c, same reason (a sub-millisecond tiny turn read as unmeasured) */
+    printf("PROF %.6f %d %d %.6f 0.0 %.6f %.6f %.6f %lld\n", dt, np, gen, disk_s, matmul_s,
+           g_prof_attn_s - attn0, g_prof_head_s - head0, g_prof_forwards - fwd0);
     fflush(stdout);
     serve_hits(m);
     free(ids);
@@ -1523,6 +1672,12 @@ static void serve_hwinfo(Model *m) {
             if (sscanf(ln, "MemTotal: %lf", &v) == 1) rt = v/1e6;
             if (sscanf(ln, "MemAvailable: %lf", &v) == 1) ra = v/1e6;
         } fclose(mi); }
+    if (ra <= 0.0) ra = compat_mem_available_gb();   /* macOS, Windows: no /proc (#1500) */
+#ifdef _WIN32
+    if (rt <= 0.0) { double a2 = 0.0; compat_meminfo(&rt, &a2); }
+#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+    if (rt <= 0.0) { long pg = sysconf(_SC_PHYS_PAGES), ps = sysconf(_SC_PAGESIZE); if (pg > 0 && ps > 0) rt = (double)pg * ps / 1e9; }
+#endif
     printf("HWINFO %d %.1f %.1f 0 0.0 %s|\n", cores, rt, ra, cpu[0] ? cpu : "unknown");
     fflush(stdout);
 }
@@ -1568,6 +1723,14 @@ static void serve_loop(Model *m, Tok *T, int ctx_cap) {
         int fatal = serve_one(m, T, &q, ctx_cap);
         free(q.payload);
         if (fatal < 0) return;
+        /* Resend the grid after EVERY turn, not only after READY: at boot the
+         * expert cache is empty by definition, and that cold snapshot stayed
+         * the only one the dashboard ever saw -- all grey, RAM 0, everything
+         * on disk, forever. HITS was already per turn, which is why the white
+         * "routed now" flash worked while the residency colour never moved.
+         * inkling.c, kimi_k3.c, qwen38.c, deepseek_v41.c and colibri.c
+         * already do this. */
+        serve_tiers_emap(m);
     }
 }
 
@@ -1622,9 +1785,16 @@ int main(int argc, char **argv) {
             m.K[i] = falloc((int64_t)m.c.n_heads * m.max_t * m.c.head_dim);
             m.V[i] = falloc((int64_t)m.c.n_heads * m.max_t * m.c.head_dim);
         }
+        /* Serve mode only: the record is sized with the cache it describes, and
+         * the cache here is allocated once for ctx_cap and never reallocated,
+         * so a recorded position stays valid for the life of the process. The
+         * CLI paths (generate/run_chat/PPL) leave it unallocated, which makes
+         * every kv_prefix call there a no-op. */
+        kv_prefix_alloc(&m.kvp, m.max_t);
         Tok T;
         char tokpath[2048]; snprintf(tokpath, sizeof(tokpath), "%s/tokenizer.json", snap);
         tok_load(&T, tokpath);
+        coli_rt_term_arm();   /* SIGTERM must reach the save below (#1629) */
         serve_loop(&m, &T, ctx_cap);
         { const char *up = getenv("COLI_USAGE");
           if (up && *up) rt_save(up, 0); }

@@ -276,6 +276,22 @@ _PARTIAL_END_RE = re.compile(r"<(?:/(?:t(?:o(?:o(?:l(?:_(?:c(?:a(?:l)?)?)?)?)?)?
 _SALVAGE = os.environ.get("COLI_TOOL_SALVAGE", "0") == "1"
 
 
+def _tool_choice_name(tool_choice):
+    """The tool name a dict `tool_choice` forces, or None.
+
+    `.get` is taken only from a dict. Writing the name where the object goes --
+    {"type": "function", "function": "search"} instead of
+    {"function": {"name": "search"}} -- raised AttributeError in the five
+    renderers that read this and in generation_options() itself, and do_POST
+    answered HTTP 500 "The colibri engine failed to process the request." for a
+    payload generation_options() already has a 400 for. Same shape as the
+    json_schema fix (#1587): read the member, then check it.
+    """
+    function = tool_choice.get("function")
+    return ((function if isinstance(function, dict) else {}).get("name")
+            or tool_choice.get("name"))
+
+
 def _tool_param_order(tools):
     """name -> ordered param names (required first) from the request schema, for de-mangling."""
     out = {}
@@ -1009,7 +1025,7 @@ def render_chat_kimi(messages, enable_thinking=False, reasoning_effort=None, too
         raise APIError(400, "`messages` must be a non-empty array.", "messages")
     forced = None
     if isinstance(tool_choice, dict):
-        forced = ((tool_choice.get("function") or {}).get("name") or tool_choice.get("name"))
+        forced = _tool_choice_name(tool_choice)
         if forced:
             tools = [t for t in (tools or [])
                      if ((t.get("function", t) if isinstance(t, dict) else {}).get("name") == forced)]
@@ -1100,8 +1116,7 @@ def render_chat_v4(messages, enable_thinking=False, reasoning_effort=None, tools
         raise APIError(400, "`messages` must be a non-empty array.", "messages")
     forced = None
     if isinstance(tool_choice, dict):
-        forced = ((tool_choice.get("function") or {}).get("name")
-                  or tool_choice.get("name"))
+        forced = _tool_choice_name(tool_choice)
         if forced:
             tools = [t for t in (tools or [])
                      if ((t.get("function", t) if isinstance(t, dict) else {}).get("name") == forced)]
@@ -1571,8 +1586,7 @@ def render_chat(messages, enable_thinking=False, reasoning_effort=None, tools=No
         prompt.append(f"<|system|>Reasoning Effort: {effort}")
     forced = None
     if isinstance(tool_choice, dict):
-        forced = ((tool_choice.get("function") or {}).get("name")
-                  or tool_choice.get("name"))
+        forced = _tool_choice_name(tool_choice)
         if forced:
             tools = [t for t in (tools or [])
                      if ((t.get("function", t) if isinstance(t, dict) else {}).get("name") == forced)]
@@ -1657,14 +1671,18 @@ GLM53_IMAGE_OPEN, GLM53_IMAGE, GLM53_IMAGE_CLOSE = (
 def _image_bytes_from_url(url):
     """data: URI, file:// o percorso sul disco -> i byte dell'immagine.
 
-    A local path is read with the server process's own permissions. On a
-    server that binds beyond loopback (which already requires an API key),
-    an authenticated client could otherwise read any file the process can
-    reach -- e.g. "file:///etc/passwd". Two guards without breaking the
-    documented loopback single-user case: '..' is refused outright (never
-    needed for a real image path), and if COLI_IMAGE_ROOT is set the resolved
-    path must stay inside it, mirroring serve_static's relative_to() check.
-    Errors stay generic so the reply never confirms a path or its permissions."""
+    A local path is read with the server process's own permissions, and an
+    inference client is not the operator: with the API key it could read any
+    file the process can reach ("file:///etc/passwd", or a bare "/etc/passwd").
+    #1354 refused '..' and confined reads to COLI_IMAGE_ROOT when set, which
+    left every absolute path readable on the default install (the variable is
+    unset out of the box). So local paths are now denied unless the operator
+    sets COLI_IMAGE_ROOT, and then only inside it (resolve() follows symlinks
+    before the relative_to() check, the same one serve_static uses). The
+    clients that used to send paths read the file themselves with the user's
+    own rights and send a data: URI: `coli chat` since this change, `coli web`
+    always did. Errors stay generic so a reply never confirms a path or its
+    permissions."""
     if not isinstance(url, str) or not url:
         raise APIError(400, "image_url.url must be a non-empty string.", "messages")
     if url.startswith("data:"):
@@ -1683,13 +1701,20 @@ def _image_bytes_from_url(url):
                             "as a base64 data: URI or a path on this machine.",
                        "messages")
     raw = url[7:] if url.startswith("file://") else url
+    image_root = os.environ.get("COLI_IMAGE_ROOT")
+    if not image_root:
+        raise APIError(400, "local image paths are disabled on this server: send the image "
+                            "as a base64 data: URI (coli chat and coli web do), or start the "
+                            "server with COLI_IMAGE_ROOT=<dir> to allow files under that "
+                            "directory.", "messages")
     if ".." in Path(raw).parts:
         raise APIError(400, "image path is not allowed.", "messages")
     try:
+        root = Path(image_root).resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("COLI_IMAGE_ROOT is not a directory")
         target = Path(raw).resolve()
-        image_root = os.environ.get("COLI_IMAGE_ROOT")
-        if image_root:
-            target.relative_to(Path(image_root).resolve())
+        target.relative_to(root)
     except (ValueError, OSError):
         raise APIError(400, "image path is not allowed.", "messages")
     try:
@@ -1944,8 +1969,7 @@ def render_chat_glm53(messages, enable_thinking=False, reasoning_effort=None, to
 
     forced = None
     if isinstance(tool_choice, dict):
-        forced = ((tool_choice.get("function") or {}).get("name")
-                  or tool_choice.get("name"))
+        forced = _tool_choice_name(tool_choice)
         if forced:
             tools = [t for t in (tools or [])
                      if ((t.get("function", t) if isinstance(t, dict) else {}).get("name") == forced)]
@@ -2001,8 +2025,22 @@ def render_chat_glm53(messages, enable_thinking=False, reasoning_effort=None, to
                 reasoning = content.split("</think>")[0].split("<think>")[-1]
                 content = content.split("</think>")[-1]
             opened = f"<think>{reasoning}</think>" if isinstance(reasoning, str) else "<think></think>"
-            prompt.append(f"<|assistant|>{opened}{content.strip()}"
-                          f"{_glm53_tool_calls(message.get('tool_calls'))}")
+            body = content.strip()
+            calls = _glm53_tool_calls(message.get("tool_calls"))
+            # The template writes "\n<tool_call>". The model, on a turn that is
+            # nothing but a tool call, writes "</think><tool_call>" with no
+            # newline between them, and that one token is enough to throw away
+            # the whole cached prefix: the reuse gate in glm53.c is
+            # all-or-nothing, so the next turn re-prefills from scratch -- on a
+            # 3k-token agent history at 2.3 tok/s, twenty minutes (#1576).
+            #
+            # A turn that also has text is left exactly as it was. There the
+            # model's own trailing newline is stripped by .strip() and put back
+            # by the renderer, so the tokens already line up, and changing that
+            # case would break the one that works today.
+            if calls and not body:
+                calls = calls.lstrip("\n")
+            prompt.append(f"<|assistant|>{opened}{body}{calls}")
         else:
             raise APIError(400, f"unsupported message role {role!r}.", "messages")
 
@@ -2130,8 +2168,7 @@ def render_chat_dsv41(messages, enable_thinking=False, reasoning_effort=None, to
         raise APIError(400, "`messages` must be a non-empty array.", "messages")
     forced = None
     if isinstance(tool_choice, dict):
-        forced = ((tool_choice.get("function") or {}).get("name")
-                  or tool_choice.get("name"))
+        forced = _tool_choice_name(tool_choice)
         if forced:
             tools = [t for t in (tools or [])
                      if ((t.get("function", t) if isinstance(t, dict) else {}).get("name") == forced)]
@@ -2651,7 +2688,7 @@ def generation_options(body, limit):
                 raise APIError(400, "`tool_choice` must be one of \"auto\", \"none\", \"required\", "
                                     "or a function object.", "tool_choice", "unsupported_value")
         elif isinstance(choice, dict):
-            name = (choice.get("function") or {}).get("name") or choice.get("name")
+            name = _tool_choice_name(choice)
             if not name:
                 raise APIError(400, "`tool_choice` function object must include a name.",
                                "tool_choice", "invalid_value")
@@ -2687,7 +2724,8 @@ def generation_options(body, limit):
         if ftype == "json_object":
             grammar = GENERIC_JSON_GBNF
         elif ftype == "json_schema":
-            schema = (response_format.get("json_schema") or {}).get("schema")
+            json_schema = response_format.get("json_schema")
+            schema = json_schema.get("schema") if isinstance(json_schema, dict) else None
             if not isinstance(schema, dict):
                 raise APIError(400, "`response_format.json_schema.schema` must be an object.",
                                "response_format", "invalid_value")
@@ -3067,16 +3105,28 @@ class Engine:
                 elif kind == "ECHO" and len(fields) >= 6:
                     # U7a prefill read-out: "ECHO <id> <n> <pos> <lp> <k>
                     # [tid tlp]*k" plus a DATA-framed payload (n bytes + LF).
-                    # Emitted only for opted-in requests; no current request
-                    # path opts in, so the frame is read (to keep the stream
-                    # in sync) and dropped -- U7b delivers it to the response
-                    # assembly when it wires the opt-in.
+                    # Emitted only for opted-in requests. Questo e' U7b: il
+                    # frame non si butta piu', va alla coda della richiesta che
+                    # l'ha chiesto. Chi non ha chiesto logprobs non ne riceve
+                    # nessuno, quindi il percorso della chat non cambia.
                     size = int(fields[2])
                     if not 0 <= size <= 65536:
                         raise RuntimeError("invalid engine DATA size")
-                    self._read_exact(size)
+                    piece = self._read_exact(size)
                     if self._read_exact(1) != b"\n":
                         raise RuntimeError("invalid engine DATA terminator")
+                    request_id = fields[1]
+                    lp = fields[4]
+                    with self.pending_lock:
+                        events = self.pending.get(request_id)
+                    if events is not None:
+                        events.put(("echo", {
+                            "pos": int(fields[3]),
+                            # " nan 0" = niente su cui condizionare: la prima
+                            # posizione assoluta non ha un predittore.
+                            "logprob": None if lp in ("nan", "-nan") else float(lp),
+                            "text": piece.decode("utf-8", "replace"),
+                        }))
                 elif kind == "ACCEPT" and len(fields) >= 3:
                     # #597: the engine validated the submission (fits context) before prefill.
                     # Keep it pending — DATA/DONE still follow — and let generate() commit the
@@ -3139,7 +3189,7 @@ class Engine:
 
     def generate(self, prompt, max_tokens, temperature, top_p, on_text, cache_slot=0,
                  cancelled=None, grammar=None, stopped=None, on_accept=None, audio=None,
-                 on_tool=None, image=None):
+                 on_tool=None, image=None, logprobs=0, pin=False, on_echo=None):
         if isinstance(cache_slot, bool) or not isinstance(cache_slot, int) or not 0 <= cache_slot < self.kv_slots:
             raise APIError(400, "Invalid cache slot.", "cache_slot")
         payload = prompt.encode("utf-8")
@@ -3196,9 +3246,18 @@ class Engine:
                       default=0)
             if cut > 0:
                 prefix_field = f" {len(xpayload)} {len(prompt[:cut].encode('utf-8'))}"
+        # Chiavi di estensione (decode_batch.h): logprobs=k accende la lettura
+        # del prefill, pin=1 fotografa lo stato a fine prompt. Una richiesta
+        # che non le manda produce un header identico a prima, byte per byte.
+        ext = ""
+        if logprobs:
+            ext += f" logprobs={int(logprobs)}"
+        if pin:
+            ext += " pin=1"
         header = (f"SUBMIT {request_id} {cache_slot} {len(payload)} {max_tokens} "
                   f"{temperature:.8g} {top_p:.8g}"
                   + (prefix_field if prefix_field else (f" {len(xpayload)}" if xpayload else ""))
+                  + ext
                   + "\n").encode()
         try:
             with self.write_lock:
@@ -3280,6 +3339,13 @@ class Engine:
                         with self.write_lock:
                             self.process.stdin.write(f"CANCEL {request_id}\n".encode())
                             self.process.stdin.flush()
+            elif kind == "echo":
+                # Lettura del prefill: arriva PRIMA di ogni DATA e non e' testo
+                # generato, quindi non passa da decode() e non entra nella
+                # risposta. La consuma chi ha chiesto il canale.
+                _accept({"prompt_tokens": None})
+                if on_echo is not None:
+                    on_echo(value)
             elif kind == "tool":
                 _accept({"prompt_tokens": None})
                 if not cancel_sent and not stop_sent:
@@ -3734,6 +3800,14 @@ class APIHandler(BaseHTTPRequestHandler):
             body = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise APIError(400, "Request body must be valid JSON.")
+        try:
+            # An escaped lone surrogate ("\ud83d") parses, but it is the same invalid
+            # text as the undecodable bytes above: no UTF-8 can carry it, and the
+            # engine protocol encodes every prompt as UTF-8.
+            json.dumps(body, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            raise APIError(400, "Request body contains an unpaired UTF-16 surrogate "
+                                "escape; strings must be valid Unicode.")
         if not isinstance(body, dict):
             raise APIError(400, "Request body must be a JSON object.")
         return body
@@ -3922,6 +3996,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.chat_completion(body, request_id)
             elif path == "/v1/completions":
                 self.completion(body, request_id)
+            elif path == "/v1/brio":
+                self.brio(body, request_id)
             elif path == "/v1/messages":
                 self.anthropic_messages(body, request_id)
             else:
@@ -3941,6 +4017,259 @@ class APIHandler(BaseHTTPRequestHandler):
                 pass
         finally:
             self._finish_request()
+
+
+    # ---------------------------------------------------------------- modalita brio
+    #
+    # Il modello non genera: si legge il logprob di ogni opzione ammessa e si
+    # normalizza sulle sole opzioni. Torna una distribuzione, non una stringa.
+    #
+    # PERCHE' IL CICLO STA QUI E NON NEL CLIENT. Servono tre cose facili da
+    # sbagliare: fotografare il prefisso condiviso (pin) cosi ogni opzione paga
+    # solo i propri token; NON mettere l'elenco delle opzioni nel prompt (su
+    # qwen36 erano 48 token su 123, meta del risparmio); e normalizzare per
+    # lunghezza, perche' sommare i logprob penalizza le opzioni da piu token --
+    # misurato, la somma diceva "merge" dove la generazione greedy dello stesso
+    # modello diceva "request changes". Un client che rifacesse questo ciclo
+    # sbaglierebbe una di queste tre, e il risultato resterebbe plausibile.
+    #
+    # COSA TORNA. Non solo il vincitore: la probabilita di OGNI opzione e
+    # l'entropia. E' la differenza con la generazione, che una risposta la da
+    # sempre e con la stessa faccia: qui "non lo so" e' un numero.
+    # TRE FORME, UN ENDPOINT. `options` e' la domanda singola. `questions` e'
+    # un elenco di domande sullo stesso stato, ognuna con le sue opzioni: lo
+    # stato viene fotografato una volta e ogni domanda paga solo se stessa,
+    # che e' dove sta il 5,7x misurato. `schema` e' un oggetto campo -> valori
+    # ammessi: il server scrive lo scheletro JSON, casella per casella, e per
+    # ognuna legge il logprob di ciascun valore. Il JSON non puo' uscire
+    # malformato perche' non lo scrive il modello. Prima queste due forme
+    # esistevano solo come script di misura: chi integrava doveva riscriverle.
+    @staticmethod
+    def _brio_options(options, where):
+        if not isinstance(options, list) or not options:
+            raise APIError(400, f"`{where}` must be a non-empty array of strings.", where)
+        if len(options) > 64:
+            raise APIError(400, f"`{where}` accepts at most 64 entries.", where)
+        seen = set()
+        for option in options:
+            if not isinstance(option, str) or not option.strip():
+                raise APIError(400, f"Every entry of `{where}` must be a non-empty string.", where)
+            if option in seen:
+                raise APIError(400, f"Duplicate option in `{where}`: {option!r}.", where)
+            seen.add(option)
+        if len(options) < 2:
+            raise APIError(400, f"`{where}` needs at least two options to choose between.", where)
+        return options
+
+    def brio(self, body, request_id):
+        forms = [k for k in ("options", "questions", "schema") if body.get(k) is not None]
+        if len(forms) != 1:
+            raise APIError(400, "Provide exactly one of `options`, `questions` or `schema`.",
+                           forms[0] if forms else "options")
+        form = forms[0]
+        question = body.get("question")
+        if question is not None and not isinstance(question, str):
+            raise APIError(400, "`question` must be a string.", "question")
+        options = questions = schema = None
+        if form == "options":
+            options = self._brio_options(body["options"], "options")
+        elif form == "questions":
+            raw = body["questions"]
+            if not isinstance(raw, list) or not raw:
+                raise APIError(400, "`questions` must be a non-empty array.", "questions")
+            if len(raw) > 64:
+                raise APIError(400, "`questions` accepts at most 64 entries.", "questions")
+            questions = []
+            for i, entry in enumerate(raw):
+                if not isinstance(entry, dict):
+                    raise APIError(400, f"`questions[{i}]` must be an object.", "questions")
+                text = entry.get("question")
+                if not isinstance(text, str) or not text.strip():
+                    raise APIError(400, f"`questions[{i}].question` must be a non-empty string.",
+                                   "questions")
+                per = entry.get("normalize", body.get("normalize", "mean"))
+                if per not in ("mean", "sum"):
+                    raise APIError(400, "`normalize` must be \"mean\" or \"sum\".", "normalize")
+                questions.append((text, self._brio_options(entry.get("options"),
+                                                           f"questions[{i}].options"), per))
+        else:
+            raw = body["schema"]
+            if not isinstance(raw, dict) or not raw:
+                raise APIError(400, "`schema` must be a non-empty object of field: [values].",
+                               "schema")
+            if len(raw) > 64:
+                raise APIError(400, "`schema` accepts at most 64 fields.", "schema")
+            schema = []
+            for field, values in raw.items():
+                if not isinstance(field, str) or not field.strip():
+                    raise APIError(400, "Every `schema` field name must be a non-empty string.",
+                                   "schema")
+                if any(ch in field for ch in '"\\\n'):
+                    raise APIError(400, f"`schema` field {field!r} cannot contain quotes, "
+                                        "backslashes or newlines.", "schema")
+                schema.append((field, self._brio_options(values, f"schema.{field}")))
+            task = body.get("task")
+            if task is not None and not isinstance(task, str):
+                raise APIError(400, "`task` must be a string.", "task")
+        state = body.get("state")
+        messages = body.get("messages")
+        if state is not None and not isinstance(state, str):
+            raise APIError(400, "`state` must be a string.", "state")
+        if state is None and isinstance(messages, list):
+            # La conversazione in corso FA da stato: e' quello che la TUI manda
+            # quando si scrive /brio a meta chat.
+            parts = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    raise APIError(400, "Every message must be an object.", "messages")
+                content = message.get("content")
+                if isinstance(content, list):
+                    content = "".join(piece.get("text", "") for piece in content
+                                      if isinstance(piece, dict))
+                if content:
+                    parts.append(f"{message.get('role', 'user')}: {content}")
+            state = "\n".join(parts)
+        if not state and not question and form == "options":
+            raise APIError(400, "Provide `state`, `messages` or `question`.", "state")
+        if not state and form != "options":
+            raise APIError(400, f"`{form}` needs a `state` (or `messages`) to decide on.", "state")
+        normalize = body.get("normalize", "mean")
+        if normalize not in ("mean", "sum"):
+            raise APIError(400, "`normalize` must be \"mean\" or \"sum\".", "normalize")
+        # Lo slot si sceglie dallo STATO, non dalla domanda: mille domande
+        # diverse sullo stesso contesto devono cadere sullo stesso slot, o la
+        # fotografia del prefisso condiviso non le serve a niente. E' la stessa
+        # regola di conversation_cache_slot per la chat, con la chiave presa
+        # dalla parte che non cambia.
+        cache_slot = body.get("cache_slot")
+        if cache_slot is None:
+            cache_slot = conversation_cache_slot(
+                [{"role": "system", "content": state or ""}], self.server.kv_slots)
+        if isinstance(cache_slot, bool) or not isinstance(cache_slot, int) \
+                or not 0 <= cache_slot < self.server.kv_slots:
+            raise APIError(400, "Invalid cache slot.", "cache_slot")
+
+        state_prefix = f"Context:\n{state}\n\n" if state else ""
+        started = time.time()
+        read_total = 0
+        prompt_max = 0
+        with self.server.scheduler.admit(self.client_disconnected, cache_slot) as admission:
+            queue_wait, cache_slot = admission
+
+            def score(text, pin):
+                """Un giro sul motore: niente generazione, solo la lettura.
+
+                max_tokens=0 vale solo con logprobs>0 e vuol dire "leggi il
+                prompt e fermati". Chiedere un token costerebbe un passo di
+                decodifica completo per opzione, buttato via."""
+                echoes = []
+                accepted = {}
+
+                def on_accept(value):
+                    accepted.update(value)
+
+                self.server.engine.generate(
+                    text, 0, 0.0, 1.0, lambda _chunk: None, cache_slot,
+                    self.client_disconnected, logprobs=1, pin=pin,
+                    on_echo=echoes.append, on_accept=on_accept)
+                n = accepted.get("prompt_tokens")
+                if n is None:                        # motore senza ACCEPT (olmoe)
+                    n = max((e["pos"] for e in echoes), default=-1) + 1
+                return n, echoes
+
+            def choose(prefix, choices, norm):
+                """Fotografa `prefix`, poi un giro per opzione: ognuna paga solo
+                i propri token. Torna (scored, entropia, token del prefisso)."""
+                nonlocal read_total, prompt_max
+                n_prefix, _ = score(prefix, True)
+                prompt_max = max(prompt_max, n_prefix)
+                scored = []
+                for option in choices:
+                    # Il cliente se n'e andato: smettere subito invece di
+                    # macinare le opzioni restanti per nessuno. Con una sola
+                    # slot KV un menu lungo abbandonato la terrebbe occupata
+                    # per minuti, e le richieste dietro andrebbero in coda fino
+                    # al timeout -- e' cosi che sono usciti i primi 429.
+                    if self.client_disconnected():
+                        raise ClientCancelled()
+                    _, tail = score(prefix + " " + option, False)
+                    rows = [e for e in tail if e["pos"] >= n_prefix and e["logprob"] is not None]
+                    total = sum(e["logprob"] for e in rows)
+                    count = max(len(rows), 1)
+                    scored.append({"option": option, "logprob": total, "tokens": len(rows),
+                                   "mean_logprob": total / count})
+                if not any(entry["tokens"] for entry in scored):
+                    raise APIError(502, "The engine returned no log probabilities for the "
+                                        "options.", None, "engine_error", "server_error")
+                key = "mean_logprob" if norm == "mean" else "logprob"
+                top = max(entry[key] for entry in scored)
+                weights = [math.exp(entry[key] - top) for entry in scored]
+                total_weight = sum(weights) or 1.0
+                for entry, weight in zip(scored, weights):
+                    entry["p"] = weight / total_weight
+                scored.sort(key=lambda entry: -entry["p"])
+                entropy = -sum(e["p"] * math.log(max(e["p"], 1e-12)) for e in scored)
+                entropy /= math.log(max(len(scored), 2))
+                read_total += sum(e["tokens"] for e in scored)
+                return scored, round(entropy, 6), n_prefix
+
+            # Lo stato da solo, fotografato per primo: e' il livello che tutte
+            # le domande (o tutte le caselle) condividono. Con un livello solo
+            # la domanda si rilegge una volta per opzione; con due, 176 token
+            # invece di 496 su quattro item (misurato).
+            if state_prefix and form != "options":
+                n_state, _ = score(state_prefix, True)
+                prompt_max = max(prompt_max, n_state)
+
+            if form == "options":
+                prefix = state_prefix
+                if question:
+                    prefix += f"Question: {question}\n"
+                prefix += "Answer:"
+                scored, entropy, _ = choose(prefix, options, normalize)
+                result = {"object": "brio.choice", "answer": scored[0]["option"],
+                          "entropy": entropy, "normalize": normalize, "choices": scored}
+
+            elif form == "questions":
+                answers = []
+                for text, choices, norm in questions:
+                    prefix = state_prefix + f"Question: {text}\nAnswer:"
+                    scored, entropy, _ = choose(prefix, choices, norm)
+                    answers.append({"question": text, "answer": scored[0]["option"],
+                                    "entropy": entropy, "normalize": norm,
+                                    "choices": scored})
+                result = {"object": "brio.answers", "answers": answers}
+
+            else:
+                # Lo scheletro JSON e' DATO: parentesi, virgolette e nomi dei
+                # campi li scriviamo noi, il modello sceglie solo il valore. Ogni
+                # casella si fotografa con dentro le scelte gia fatte, cosi il
+                # campo dopo vede quelli prima, come nella generazione.
+                head = state_prefix + (f"Task: {task}\n" if task else "")
+                filled, fields = {}, []
+                for field, values in schema:
+                    skeleton = "{" + "".join(
+                        f'"{k}": {json.dumps(v)}, ' for k, v in filled.items())
+                    prefix = head + skeleton + f'"{field}": "'
+                    scored, entropy, _ = choose(prefix, values, normalize)
+                    filled[field] = scored[0]["option"]
+                    fields.append({"field": field, "value": scored[0]["option"],
+                                   "p": scored[0]["p"], "entropy": entropy,
+                                   "choices": scored})
+                result = {"object": "brio.schema", "json": filled, "fields": fields,
+                          "normalize": normalize}
+
+        result.update({
+            "id": "brio-" + uuid.uuid4().hex,
+            "created": int(time.time()),
+            "model": self.server.model_id,
+            "usage": {"prompt_tokens": prompt_max, "completion_tokens": 0,
+                      "read_tokens": read_total,
+                      "total_tokens": prompt_max + read_total},
+        })
+        self.send_json(200, result, request_id,
+                       {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000)),
+                        "x-colibri-elapsed-ms": str(round((time.time() - started) * 1000))})
 
     def _fail(self, error, request_id):
         """Report an error, unless the response is already on the wire. Once a streaming 200
