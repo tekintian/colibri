@@ -18,8 +18,9 @@ Darwin)
     command -v clang >/dev/null || { echo "clang is missing (run: xcode-select --install)"; exit 1; }
     echo "  clang: $(clang --version | head -1) · $(sysctl -n hw.ncpu) core"
     echo -n "  OpenMP: "
-    if [ -f "$(brew --prefix libomp 2>/dev/null)/lib/libomp.dylib" ]; then echo "ok (libomp)"
-    else echo "libomp is missing -> single-threaded build (recommended: brew install libomp)"; fi
+    if [ -f "$(brew --prefix libomp 2>/dev/null)/lib/libomp.dylib" ]; then echo "ok (libomp via Homebrew)"
+    elif [ -f "/opt/local/lib/libomp/libomp.dylib" ]; then echo "ok (libomp via MacPorts)"
+    else echo "libomp is missing -> single-threaded build (recommended: brew install libomp or port install libomp)"; fi
     ;;
 MINGW*|MSYS*)
     command -v gcc  >/dev/null || { echo "gcc is missing (MinGW-w64). Install: pacman -S mingw-w64-x86_64-gcc make"; exit 1; }

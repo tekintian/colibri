@@ -60,6 +60,11 @@ ifneq (,$(DARWIN))
 # Niente -march: su arm64 NEON e' baseline (i kernel __ARM_NEON si attivano da soli).
 CC      = clang
 OMPDIR := $(shell brew --prefix libomp 2>/dev/null)
+# `brew --prefix libomp` can print the formula's prospective path even when it
+# is not installed, so verify the header exists before accepting the path.
+ifeq ($(wildcard $(OMPDIR)/include/omp.h),)
+OMPDIR :=
+endif
 # CLT-only Macs routinely have Homebrew installed but off the non-interactive
 # PATH (`make` from scripts, SSH, CI), which turned this probe into a silent
 # single-threaded build with libomp sitting right there on disk. Fall back to
@@ -67,11 +72,25 @@ OMPDIR := $(shell brew --prefix libomp 2>/dev/null)
 ifeq ($(OMPDIR),)
 OMPDIR := $(firstword $(wildcard /opt/homebrew/opt/libomp /usr/local/opt/libomp))
 endif
+# MacPorts installs libomp under /opt/local with headers in include/libomp/
+# and libraries in lib/libomp/.
+ifeq ($(OMPDIR),)
+ifneq ($(wildcard /opt/local/include/libomp/omp.h /opt/local/lib/libomp/libomp.*),)
+OMPDIR   := /opt/local
+OMP_INCDIR := $(OMPDIR)/include/libomp
+OMP_LIBDIR := $(OMPDIR)/lib/libomp
+endif
+endif
+# Default include/lib dirs for Homebrew (no subdirectory).
+ifeq ($(OMP_INCDIR),)
+OMP_INCDIR := $(OMPDIR)/include
+OMP_LIBDIR := $(OMPDIR)/lib
+endif
 # `brew --prefix libomp` can print the formula's prospective path even when it
 # is not installed, so verify both artifacts before adding unusable flags.
-ifneq ($(and $(OMPDIR),$(wildcard $(OMPDIR)/include/omp.h),$(wildcard $(OMPDIR)/lib/libomp.*)),)
-OMPC    = -Xclang -fopenmp -I$(OMPDIR)/include
-OMPL    = -L$(OMPDIR)/lib -lomp
+ifneq ($(and $(OMPDIR),$(wildcard $(OMP_INCDIR)/omp.h),$(wildcard $(OMP_LIBDIR)/libomp.*)),)
+OMPC    = -Xclang -fopenmp -I$(OMP_INCDIR)
+OMPL    = -L$(OMP_LIBDIR) -lomp
 else
 $(warning libomp not found: building single-threaded. For multithreading: brew install libomp)
 OMPC    =
